@@ -1,0 +1,6 @@
+{
+  "name": "Jang Guru App Hub",
+  "description": "Jang Guru App Hub adalah platform administratif komprehensif bagi guru untuk mengelola absensi digital, ruang wali kelas & home visit, penilaian otomatis berbasis AI, penjadwalan kelas, manajemen tugas, daftar nilai, dan jurnal harian mengajar dengan sinkronisasi realtime multi-perangkat via Google Firestore.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

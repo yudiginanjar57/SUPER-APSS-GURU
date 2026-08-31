@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg-grad-512" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e3a8a" />
+      <stop offset="50%" stop-color="#2563eb" />
+      <stop offset="100%" stop-color="#3b82f6" />
+    </linearGradient>
+    <linearGradient id="cap-grad-512" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg-grad-512)" />
+  <g transform="translate(68, 68)" fill="none" stroke="#ffffff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M188 50 L350 135 L188 220 L26 135 Z" fill="#ffffff" fill-opacity="0.15" />
+    <path d="M188 50 L350 135 L188 220 L26 135 Z" />
+    <path d="M80 170 V255 C80 310 188 335 188 335 C188 335 296 310 296 255 V170" fill="#ffffff" fill-opacity="0.1" />
+    <path d="M80 170 V255 C80 310 188 335 188 335 C188 335 296 310 296 255 V170" />
+    <path d="M350 135 V240" stroke="url(#cap-grad-512)" stroke-width="16" />
+    <circle cx="350" cy="252" r="14" fill="#f59e0b" stroke="none" />
+  </g>
+</svg>
