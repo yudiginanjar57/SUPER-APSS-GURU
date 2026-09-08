@@ -49,17 +49,15 @@ async function generateContentWithRetry(
   maybeParams?: { contents: any; config?: any }
 ) {
   const params = maybeParams || aiOrParams;
-  // Prioritize Gemini 3.1 Pro for high-precision reasoning, followed by fast Flash fallbacks
+  // Prioritize active, fast, and accurate Gemini 3.6 Flash & 3.1 Flash Lite models followed by reliable fallbacks
   const candidateModels = [
-    "gemini-3.1-pro-preview",
-    "gemini-3.7-flash",
-    "gemini-flash-latest",
-    "gemini-3.1-flash-lite"
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-flash-latest"
   ];
 
-  // Optimize thinking config to LOW for ultra-fast generation latency while preserving top accuracy
   const config = {
-    thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
     ...(params.config || {})
   };
 
@@ -368,6 +366,7 @@ app.post("/api/penilaian-ai", async (req, res) => {
       jawabanSiswaText, 
       fileBase64, 
       fileMimeType,
+      files, // Array of { base64, mimeType, fileBase64, fileMimeType } for multi-photo support (up to 10 photos)
       questionTypes,
       studentsRoster
     } = req.body;
@@ -400,21 +399,41 @@ KUNCI JAWABAN & RUBRIK GURU:
 - Uraian / Esai & Rubrik: ${typeof kunciJawaban === 'object' ? (kunciJawaban.uraian || "Tidak disediakan") : "Tidak disediakan"}
 `;
 
-    if (method === "scan_pdf" && fileBase64) {
-      const base64Data = fileBase64.replace(/^data:[^;]+;base64,/, "");
-      contents.push({
-        inlineData: {
-          data: base64Data,
-          mimeType: fileMimeType || "application/pdf"
+    // Process files list (supports multi-photo up to 10 photos)
+    const filesList: Array<{ base64: string; mimeType: string }> = [];
+    if (Array.isArray(files) && files.length > 0) {
+      files.slice(0, 10).forEach((f: any) => {
+        const rawB64 = f.base64 || f.fileBase64;
+        if (rawB64) {
+          filesList.push({
+            base64: rawB64.replace(/^data:[^;]+;base64,/, ""),
+            mimeType: f.mimeType || f.fileMimeType || "image/jpeg"
+          });
         }
       });
+    } else if (fileBase64) {
+      filesList.push({
+        base64: fileBase64.replace(/^data:[^;]+;base64,/, ""),
+        mimeType: fileMimeType || "application/pdf"
+      });
+    }
+
+    if (method === "scan_pdf" && filesList.length > 0) {
+      filesList.forEach((f) => {
+        contents.push({
+          inlineData: {
+            data: f.base64,
+            mimeType: f.mimeType
+          }
+        });
+      });
       promptText += `
-INSTRUKSI PEMINDAIAN LEMBAR JAWABAN (VISION OCR PARAMETER ABSEN):
-1. Pindai dan ekstrak data dari dokumen/gambar Lembar Jawaban Siswa yang terlampir.
+INSTRUKSI PEMINDAIAN ${filesList.length} LEMBAR FOTO JAWABAN SISWA (VISION OCR MULTI-PHOTO):
+1. Terdapat ${filesList.length} lembar/foto jawaban terlampir (halaman 1 sampai halaman ${filesList.length}). Pindai dan ekstrak data dari SELURUH foto/halaman tersebut secara berurutan sebagai SATU KESATUAN lembar jawaban siswa.
 2. Identifikasi Nomor Absen siswa yang tertera pada lembar ujian (No. Absen, No, Nomor Presensi).
 3. Jika Nomor Absen tertera dan terdapat Daftar Siswa di atas, AMBIL DAN GUNAKAN NAMA RESMI SISWA DARI DAFTAR KELAS SESUAI DENGAN NOMOR ABSEN TERSEBUT.
 4. Jika Nomor Absen tidak ada, ambil nama yang tertulis di lembar ujian dan cocokkan dengan daftar kelas atau gunakan ${namaSiswa || "Siswa"}.
-5. Ekstrak jawaban siswa. PENTING: Salin/transkripsi teks tulisan siswa SECARA HARFIAH (APA ADANYA) ke dalam field 'studentAnswer'. DILARANG KERAS mengoreksi ejaan, melengkapi kalimat, atau mengubah tulisan asli siswa sedikitpun.
+5. Ekstrak seluruh jawaban dari seluruh ${filesList.length} foto. PENTING: Salin/transkripsi teks tulisan siswa SECARA HARFIAH (APA ADANYA) ke dalam field 'studentAnswer'. DILARANG KERAS mengoreksi ejaan, melengkapi kalimat, atau mengubah tulisan asli siswa sedikitpun.
 6. Bandingkan 'studentAnswer' dengan Kunci Jawaban & Rubrik secara objektif. Tulis evaluasi, alasan salah/benar, dan koreksinya HANYA di dalam field 'note'.
 7. Hitung skor numerik adil per nomor, skor per bentuk soal, dan skor total (skala 0 - 100).
 8. Susun tabel detail koreksi dan laporan markdown yang rapi.
@@ -577,6 +596,7 @@ app.post("/api/penilaian-ai-batch", async (req, res) => {
       answerText?: string;
       fileBase64?: string;
       fileMimeType?: string;
+      files?: Array<{ base64?: string; fileBase64?: string; mimeType?: string; fileMimeType?: string }>;
     }) => {
       const contents: any[] = [];
       let promptText = `
@@ -595,30 +615,50 @@ KUNCI JAWABAN & RUBRIK GURU:
 - Uraian / Esai & Rubrik: ${typeof kunciJawaban === 'object' ? (kunciJawaban.uraian || "Tidak disediakan") : "Tidak disediakan"}
 `;
 
-      if (studentItem.fileBase64) {
-        const base64Data = studentItem.fileBase64.replace(/^data:[^;]+;base64,/, "");
-        contents.push({
-          inlineData: {
-            data: base64Data,
-            mimeType: studentItem.fileMimeType || "application/pdf"
+      const filesList: Array<{ base64: string; mimeType: string }> = [];
+      if (Array.isArray(studentItem.files) && studentItem.files.length > 0) {
+        studentItem.files.slice(0, 10).forEach((f) => {
+          const rawB64 = f.base64 || f.fileBase64;
+          if (rawB64) {
+            filesList.push({
+              base64: rawB64.replace(/^data:[^;]+;base64,/, ""),
+              mimeType: f.mimeType || f.fileMimeType || "image/jpeg"
+            });
           }
         });
+      } else if (studentItem.fileBase64) {
+        filesList.push({
+          base64: studentItem.fileBase64.replace(/^data:[^;]+;base64,/, ""),
+          mimeType: studentItem.fileMimeType || "application/pdf"
+        });
+      }
+
+      if (filesList.length > 0) {
+        filesList.forEach((f) => {
+          contents.push({
+            inlineData: {
+              data: f.base64,
+              mimeType: f.mimeType
+            }
+          });
+        });
         promptText += `
-INSTRUKSI PEMINDAIAN LEMBAR JAWABAN SISWA (TINGKAT AKURASI TINGGI - OCR IMPROVISED):
-1. PINDAI DENGAN AKURASI TINGGI & TELITI:
+INSTRUKSI PEMINDAIAN ${filesList.length} LEMBAR FOTO JAWABAN SISWA (TINGKAT AKURASI TINGGI - OCR MULTI-PHOTO):
+1. Terdapat ${filesList.length} foto/lembar terlampir untuk siswa ini. Pindai SELURUH foto (halaman 1 sampai ${filesList.length}) secara berurutan dan cermat.
+2. PINDAI DENGAN AKURASI TINGGI & TELITI:
    - Amati coretan, pembetulan, atau penulisan ganda. Jika ada jawaban yang dicoret atau diperbaiki oleh siswa (misalnya dicoret dengan tanda silang atau ditindih huruf baru), gunakan jawaban yang paling akhir ditulis/yang dibetulkan.
    - Pindai dengan resolusi pengamatan visual tertinggi. Amati baik-baik perbedaan antara huruf cetak atau tulisan tangan yang mirip, seperti 'D' vs 'O', 'B' vs '8', 'A' vs '4', atau 'C' vs 'G'.
    - Jika jawaban berupa pilihan ganda (PG) yang dilingkari, disilang, atau dicentang pada lembar jawaban berkolom, temukan letak tanda silang/lingkaran tersebut secara tepat pada huruf A, B, C, D, atau E.
-2. ALUR IDENTIFIKASI PESERTA:
+3. ALUR IDENTIFIKASI PESERTA:
    - PARAMETER 1 (PRIORITAS UTAMA): Cari "No. Absen", "No. Presensi", "No", atau angka absen di kop/header lembar ujian. Jika terdeteksi angka absen, kembalikan nomor tersebut pada field 'absenNo'. Cocokkan dengan nama resmi dari DAFTAR SISWA KELAS.
    - PARAMETER 2 (PRIORITAS KEDUA): Jika nomor absen tidak ditemukan atau buram, identifikasi berdasarkan teks Nama Siswa di lembar ujian (kembalikan pada field 'namaSiswa') dan cocokkan dengan nama resmi terdekat di DAFTAR SISWA KELAS.
    - Jika kedua parameter di atas tidak cocok sama sekali dengan daftar kelas, kembalikan namaSiswa sesuai tulisan tangan di lembar jawaban dan absenNo sesuai nomor yang terbaca (atau null). DILARANG KERAS berasumsi/mencocokkan ke nama siswa acak dari roster jika tidak ada bukti tertulis.
-3. EKSTRAKSI JAWABAN & KOREKSI MATEMATIKA EKSAK:
-   - Ekstrak jawaban siswa untuk setiap nomor. PENTING: Anda WAJIB menyalin teks jawaban siswa ke dalam field 'studentAnswer' SECARA HARFIAH (LITERAL TRANSCRIBE), HURUF DEMI HURUF APA ADANYA. Dilarang keras mengoreksi ejaan yang salah, menebak makna, atau memodifikasi teks asli yang ditulis siswa.
+4. EKSTRAKSI JAWABAN & KOREKSI MATEMATIKA EKSAK:
+   - Ekstrak seluruh jawaban siswa dari ${filesList.length} foto tersebut untuk setiap nomor. PENTING: Anda WAJIB menyalin teks jawaban siswa ke dalam field 'studentAnswer' SECARA HARFIAH (LITERAL TRANSCRIBE), HURUF DEMI HURUF APA ADANYA. Dilarang keras mengoreksi ejaan yang salah, menebak makna, atau memodifikasi teks asli yang ditulis siswa.
    - Bandingkan jawaban mentah tersebut dengan Kunci Jawaban & Rubrik di atas untuk menilai. Letakkan hasil perbandingan, alasan mengapa salah/benar, dan koreksi substansi HANYA pada field 'note'.
    - JANGAN ada pembulatan skor per butir soal yang salah. Hitung skor total dengan rumus matematika eksak: (Jumlah skor yang diperoleh / Jumlah skor maksimal) * 100 untuk semua soal yang dikoreksi secara proporsional.
    - Lakukan verifikasi ganda (double-check) mandiri sebelum mengembalikan JSON: Pastikan field 'totalScore' benar-benar hasil perhitungan kumulatif yang tepat dan tidak salah hitung/tidak meleset dari rincian item per butir soal.
-4. Susun rincian koreksi per butir nomor, analisis kekuatan/kelemahan, dan feedback mendidik yang ramah.
+5. Susun rincian koreksi per butir nomor, analisis kekuatan/kelemahan, dan feedback mendidik yang ramah.
 `;
       } else {
         promptText += `

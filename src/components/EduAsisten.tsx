@@ -1,17 +1,26 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, ChangeEvent } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { safeStorage } from "../lib/safeStorage";
 import { 
   Bot, Send, Sparkles, BookOpen, Target, FileQuestion, ClipboardCheck, 
   Loader2, X, Download, Menu, Plus, MessageSquare, Edit2, Reply, Trash2, 
   ThumbsUp, ThumbsDown, Copy, Check, RefreshCw, User, UserCheck, Settings,
-  Upload, FileUp, CheckSquare, ListChecks
+  Upload, FileUp, CheckSquare, ListChecks, Printer, FileText, SlidersHorizontal,
+  Image as ImageIcon, Link as LinkIcon, Building2, CheckCircle2, Info
 } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeRaw from "rehype-raw";
 import rehypeKatex from "rehype-katex";
+import EduExportModal from "./EduExportModal";
+import { 
+  exportToWordFormatted, 
+  printDocumentFormatted, 
+  copyFormattedRichText 
+} from "../lib/documentExporter";
+import { formatDriveImageUrl } from "../lib/driveUtils";
+import { compressImage, compressFileForOCR } from "../lib/imageUtils";
 
 interface Message {
   id: string;
@@ -367,27 +376,58 @@ export default function EduAsisten() {
     handleSubmit(undefined, revisionPrompt);
   };
 
-  // User Profile State (Sekolah, Guru, TTD Kepala Sekolah)
+  // User Profile State (Sekolah, Guru, TTD Kepala Sekolah & Kop Surat Digital)
   const [userProfile, setUserProfile] = useState<{
     namaSekolah: string;
     namaPenyusun: string;
     nipPenyusun: string;
     namaKepsek: string;
     nipKepsek: string;
+    kopType?: 'text' | 'image';
+    kopImageUrl?: string;
   }>(() => {
+    const savedKopType = (localStorage.getItem("eduasisten_kop_type") as "text" | "image") || "text";
+    const savedKopImage = localStorage.getItem("eduasisten_kop_image") || "";
+
     return safeStorage.getJSON("eduasisten_profile", {
       namaSekolah: "SMAN 1 Jakarta",
       namaPenyusun: "Guru Penggerak, S.Pd.",
       nipPenyusun: "19850101 201001 1 001",
       namaKepsek: "Dr. H. Kepala Sekolah, M.Pd.",
-      nipKepsek: "19720315 199802 1 002"
+      nipKepsek: "19720315 199802 1 002",
+      kopType: savedKopType,
+      kopImageUrl: savedKopImage
     });
   });
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportModalContent, setExportModalContent] = useState("");
+  const [copiedRichId, setCopiedRichId] = useState<string | null>(null);
 
   useEffect(() => {
     safeStorage.setItem("eduasisten_profile", userProfile);
+    if (userProfile.kopType) {
+      localStorage.setItem("eduasisten_kop_type", userProfile.kopType);
+    }
+    if (userProfile.kopImageUrl !== undefined) {
+      localStorage.setItem("eduasisten_kop_image", userProfile.kopImageUrl);
+    }
   }, [userProfile]);
+
+  const handleProfileKopUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const compressed = await compressImage(file, 1600, 0.85);
+      setUserProfile(prev => ({
+        ...prev,
+        kopType: "image",
+        kopImageUrl: compressed
+      }));
+    } catch (err) {
+      console.error("Gagal unggah kop:", err);
+    }
+  };
 
   // Modal State for Perangkat Pembelajaran
   const [isPerangkatModalOpen, setIsPerangkatModalOpen] = useState(false);
@@ -1054,96 +1094,7 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
   };
 
   const exportToWord = (contentHtml: string) => {
-    let processedHtml = contentHtml.replace(/●/g, "&bull; ");
-
-    const style = `<style>
-      @page {
-        size: A4 portrait;
-        margin: 2.5cm 2cm 2.5cm 2cm;
-      }
-      body {
-        font-family: 'Calibri', 'Arial', sans-serif;
-        font-size: 11pt;
-        color: #0f172a;
-        line-height: 1.6;
-      }
-      p {
-        margin-top: 0;
-        margin-bottom: 8pt;
-        line-height: 1.5;
-        text-align: justify;
-      }
-      h1, h2, h3, h4, h5 {
-        font-family: 'Calibri', 'Arial', sans-serif;
-        color: #1e3a8a;
-        font-weight: bold;
-        margin-top: 14pt;
-        margin-bottom: 6pt;
-        page-break-after: avoid;
-      }
-      h1 { font-size: 16pt; border-bottom: 2pt solid #2563eb; padding-bottom: 4pt; }
-      h2 { font-size: 13pt; color: #1e40af; border-bottom: 1pt solid #cbd5e1; padding-bottom: 2pt; }
-      h3 { font-size: 11.5pt; color: #1e3a8a; }
-      table {
-        border-collapse: collapse;
-        width: 100%;
-        margin: 12pt 0;
-        font-size: 10pt;
-        page-break-inside: avoid;
-      }
-      th, td {
-        border: 1pt solid #475569;
-        padding: 6pt 9pt;
-        text-align: left;
-        vertical-align: top;
-      }
-      th {
-        background-color: #e2e8f0;
-        font-weight: bold;
-        color: #0f172a;
-      }
-      tr:nth-child(even) td {
-        background-color: #f8fafc;
-      }
-      ul, ol {
-        margin-top: 4pt;
-        margin-bottom: 8pt;
-        padding-left: 18pt;
-      }
-      li {
-        margin-bottom: 4pt;
-        line-height: 1.5;
-        text-align: left;
-      }
-      blockquote {
-        border-left: 4pt solid #2563eb;
-        background-color: #eff6ff;
-        color: #1e3a8a;
-        padding: 8pt 12pt;
-        margin: 10pt 0;
-        font-style: italic;
-      }
-      strong, b {
-        color: #0f172a;
-      }
-      hr {
-        border: none;
-        border-top: 1pt solid #cbd5e1;
-        margin: 14pt 0;
-      }
-    </style>`;
-
-    const header = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'>${style}<title>Dokumen Modul Ajar EduAsisten</title></head><body>`;
-    const footer = "</body></html>";
-    const sourceHTML = header + processedHtml + footer;
-    
-    const source = 'data:application/vnd.ms-word;charset=utf-8,' + encodeURIComponent(sourceHTML);
-    const fileDownload = document.createElement("a");
-    document.body.appendChild(fileDownload);
-    fileDownload.href = source;
-    fileDownload.download = 'Dokumen_Modul_Ajar_EduAsisten.doc';
-    fileDownload.click();
-    document.body.removeChild(fileDownload);
+    exportToWordFormatted(contentHtml, {}, userProfile);
   };
 
   const quickActions = [
@@ -1388,22 +1339,72 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
                       </div>
 
                       {/* Assistant Message Actions Toolbar */}
-                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2.5 border-t border-slate-100 text-xs">
                         <div className="flex items-center gap-1.5 flex-wrap">
+                          {/* Quick Word Export */}
                           <button 
                             onClick={() => {
                               const el = document.getElementById(`markdown-${msg.id}`);
-                              if (el) exportToWord(el.innerHTML);
+                              if (el) exportToWordFormatted(el.innerHTML, {}, userProfile);
                             }}
-                            className="flex items-center gap-1 px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-colors"
+                            className="flex items-center gap-1 px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold rounded-lg transition-colors border border-blue-200/60 shadow-2xs"
+                            title="Unduh format Microsoft Word (.doc) rapi & siap pakai"
                           >
-                            <Download size={13} />
-                            Word
+                            <Download size={13} className="text-blue-600" />
+                            <span>Word</span>
+                          </button>
+
+                          {/* Quick PDF & Print */}
+                          <button 
+                            onClick={() => {
+                              const el = document.getElementById(`markdown-${msg.id}`);
+                              if (el) printDocumentFormatted(el.innerHTML, {}, userProfile);
+                            }}
+                            className="flex items-center gap-1 px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold rounded-lg transition-colors border border-rose-200/60 shadow-2xs"
+                            title="Cetak langsung atau simpan dokumen ke PDF A4/F4"
+                          >
+                            <Printer size={13} className="text-rose-600" />
+                            <span>PDF / Cetak</span>
+                          </button>
+
+                          {/* Copy Formatted Rich-Text */}
+                          <button 
+                            onClick={async () => {
+                              const el = document.getElementById(`markdown-${msg.id}`);
+                              if (el) {
+                                const success = await copyFormattedRichText(el.innerHTML, {}, userProfile);
+                                if (success) {
+                                  setCopiedRichId(msg.id);
+                                  setTimeout(() => setCopiedRichId(null), 2000);
+                                }
+                              }
+                            }}
+                            className="flex items-center gap-1 px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-bold rounded-lg transition-colors border border-emerald-200/60 shadow-2xs"
+                            title="Salin tabel & format langsung ke Word/Google Docs (Ctrl+V tanpa berantakan)"
+                          >
+                            {copiedRichId === msg.id ? <Check size={13} className="text-emerald-700" /> : <Copy size={13} className="text-emerald-600" />}
+                            <span>{copiedRichId === msg.id ? "Format Tersalin!" : "Salin Rapi"}</span>
+                          </button>
+
+                          {/* Complete Export Options & Preview Modal */}
+                          <button 
+                            onClick={() => {
+                              const el = document.getElementById(`markdown-${msg.id}`);
+                              if (el) {
+                                setExportModalContent(el.innerHTML);
+                                setIsExportModalOpen(true);
+                              }
+                            }}
+                            className="flex items-center gap-1 px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-lg transition-colors border border-indigo-200/60 shadow-2xs"
+                            title="Preview & atur Kop Surat, ukuran kertas A4/F4, font resmi, atau TTD"
+                          >
+                            <SlidersHorizontal size={13} className="text-indigo-600" />
+                            <span>Opsi Ekspor</span>
                           </button>
 
                           <button 
                             onClick={() => handleReplyMessage(msg)}
-                            className="flex items-center gap-1 px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-lg transition-colors"
+                            className="flex items-center gap-1 px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-colors"
                           >
                             <Reply size={13} />
                             Balas
@@ -1412,19 +1413,19 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
                           <button 
                             onClick={() => handleCopyMessage(msg.id, msg.content)}
                             className="flex items-center gap-1 px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold rounded-lg transition-colors"
-                            title="Salin pesan"
+                            title="Salin teks Markdown mentah"
                           >
                             {copiedId === msg.id ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
-                            {copiedId === msg.id ? "Tersalin!" : "Salin"}
+                            {copiedId === msg.id ? "Tersalin!" : "Teks"}
                           </button>
 
                           {/* Revision Dropdown */}
                           <div className="relative">
                             <button
                               onClick={() => setShowRevisionMenu(showRevisionMenu === msg.id ? null : msg.id)}
-                              className="flex items-center gap-1 px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-bold rounded-lg transition-colors"
+                              className="flex items-center gap-1 px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-bold rounded-lg transition-colors border border-amber-200/50"
                             >
-                              <RefreshCw size={13} />
+                              <RefreshCw size={13} className="text-amber-600" />
                               Perbaiki
                             </button>
 
@@ -2177,6 +2178,94 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
                     </div>
                   </div>
                 </div>
+
+                {/* Section Kop Surat Digital Sekolah */}
+                <div className="space-y-3 pt-3 border-t border-slate-200">
+                  <h4 className="text-xs font-extrabold text-indigo-700 uppercase tracking-wider flex items-center gap-1.5">
+                    <Building2 size={15} /> Kop Surat Digital Dokumen Output
+                  </h4>
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wide">Pilih Jenis Kop Surat</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setUserProfile({ ...userProfile, kopType: "text" })}
+                        className={`p-2.5 rounded-xl border text-left text-xs font-bold transition-all flex items-center gap-2 ${
+                          userProfile.kopType === "text" || !userProfile.kopType
+                            ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
+                            : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100"
+                        }`}
+                      >
+                        <FileText size={15} /> 📝 Teks Standar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setUserProfile({ ...userProfile, kopType: "image" })}
+                        className={`p-2.5 rounded-xl border text-left text-xs font-bold transition-all flex items-center gap-2 ${
+                          userProfile.kopType === "image"
+                            ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
+                            : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100"
+                        }`}
+                      >
+                        <ImageIcon size={15} /> 🖼️ Gambar Kop Digital
+                      </button>
+                    </div>
+                  </div>
+
+                  {userProfile.kopType === "image" && (
+                    <div className="p-3 bg-indigo-50/60 rounded-xl border border-indigo-100 space-y-3">
+                      {userProfile.kopImageUrl ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-extrabold text-slate-800 flex items-center gap-1">
+                              <CheckCircle2 size={14} className="text-emerald-600" /> Gambar Kop Terpasang
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setUserProfile({ ...userProfile, kopImageUrl: "" })}
+                              className="text-[11px] text-rose-600 font-bold hover:underline"
+                            >
+                              Hapus Gambar
+                            </button>
+                          </div>
+                          <div className="bg-white p-2 rounded-lg border border-slate-200 text-center">
+                            <img
+                              src={formatDriveImageUrl(userProfile.kopImageUrl)}
+                              alt="Kop Profile Preview"
+                              className="max-h-20 max-w-full mx-auto object-contain"
+                              referrerPolicy="no-referrer"
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-indigo-900 italic font-medium">
+                          Unggah file gambar Kop Surat resmi sekolah Anda (PNG/JPG) atau masukkan link Google Drive.
+                        </p>
+                      )}
+
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-700 uppercase tracking-wide">Unggah Berkas Gambar Kop Surat</label>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleProfileKopUpload}
+                          className="block w-full text-xs text-slate-500 file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-[11px] file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 file:cursor-pointer border border-slate-200 rounded-lg bg-white p-1"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-700 uppercase tracking-wide">Atau Link Google Drive / URL Gambar</label>
+                        <input
+                          type="text"
+                          placeholder="https://drive.google.com/file/d/.../view"
+                          value={userProfile.kopImageUrl || ""}
+                          onChange={(e) => setUserProfile({ ...userProfile, kopImageUrl: e.target.value })}
+                          className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-medium focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -2404,19 +2493,21 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
                     <input
                       type="file"
                       accept=".pdf,image/png,image/jpeg,image/jpg"
-                      onChange={(e) => {
+                      onChange={async (e) => {
                         const file = e.target.files?.[0];
                         if (file) {
-                          const reader = new FileReader();
-                          reader.onloadend = () => {
+                          try {
+                            const base64 = await compressFileForOCR(file);
+                            const isPdf = file.type.includes("pdf") || file.name.toLowerCase().endsWith(".pdf");
                             setPenilaianForm({
                               ...penilaianForm,
-                              fileBase64: reader.result as string,
-                              fileMimeType: file.type || "application/pdf",
+                              fileBase64: base64,
+                              fileMimeType: isPdf ? "application/pdf" : "image/jpeg",
                               fileName: file.name
                             });
-                          };
-                          reader.readAsDataURL(file);
+                          } catch (err) {
+                            console.error("Error processing file:", err);
+                          }
                         }
                       }}
                       className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
@@ -2463,6 +2554,14 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
           </motion.div>
         </div>
       )}
+
+      {/* Modal Ekspor & Cetak Rapi Dokumen */}
+      <EduExportModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        rawContentHtml={exportModalContent}
+        userProfile={userProfile}
+      />
     </div>
   );
 }

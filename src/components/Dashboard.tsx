@@ -74,10 +74,11 @@ export default function Dashboard({
     ? attendanceList.filter(a => a.date === todayDateStr)
     : [];
   const attendanceSource = todayAttendance.length > 0 ? todayAttendance : (attendanceList || []);
-  const presentCount = attendanceSource.filter(a => a.status === 'Hadir').length;
-  const attendancePercentage = attendanceSource.length > 0 
-    ? `${Math.round((presentCount / attendanceSource.length) * 100)}%`
-    : "-";
+  const activeTeachingAttendance = attendanceSource.filter(a => a.status !== 'Tidak Mengajar');
+  const presentCount = activeTeachingAttendance.filter(a => a.status === 'Hadir').length;
+  const attendancePercentage = activeTeachingAttendance.length > 0 
+    ? `${Math.round((presentCount / activeTeachingAttendance.length) * 100)}%`
+    : (attendanceSource.length > 0 ? "Tidak Ada KBM" : "-");
 
   // Administrative workload / task progress computation
   const totalSubmissions = submissions ? submissions.length : 0;
@@ -371,8 +372,10 @@ export default function Dashboard({
       <div className="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-3xl p-6 text-white shadow-md relative overflow-hidden" id="quick-action-strip">
         <div className="absolute top-0 right-0 -mr-6 -mt-6 w-32 h-32 bg-white/5 rounded-full" />
         <h3 className="text-md font-bold font-display mb-3 flex items-center gap-1.5">Akses Pintasan Cepat</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           {[
+            { label: "Ruang Belajar", desc: "PPT & Video Google Drive", tab: "ruangbelajar", bg: "bg-emerald-400/20 hover:bg-emerald-400/30" },
+            { label: "Evaluasi & Ujian (CBT)", desc: "Ujian Secure Mode", tab: "evaluasi", bg: "bg-rose-400/20 hover:bg-rose-400/30" },
             { label: "Buka Absensi", desc: "Isi absensi kelas", tab: "absensi", bg: "bg-white/10 hover:bg-white/20" },
             { label: "Koreksi AI", desc: "Penilaian esai otomatis", tab: "penilaian", bg: "bg-indigo-400/20 hover:bg-indigo-400/30" },
             { label: "Jadwal Mengajar", desc: "Lihat kalender mingguan", tab: "jadwal", bg: "bg-amber-400/20 hover:bg-amber-400/30" },

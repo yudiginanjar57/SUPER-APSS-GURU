@@ -1,11 +1,11 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, FileSpreadsheet, FileText } from 'lucide-react';
+import { X, FileSpreadsheet, FileText, Printer } from 'lucide-react';
 
 interface PreviewModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: (type: 'xlsx' | 'pdf') => void;
+  onConfirm: (type: 'xlsx' | 'pdf' | 'print') => void;
   data: any[];
   title: string;
   columns: string[];
@@ -35,29 +35,50 @@ export default function ExportPreviewModal({ isOpen, onClose, onConfirm, data, t
             </button>
           </div>
           <div className="flex-1 overflow-auto p-5">
-            <table className="w-full text-xs text-slate-600">
-              <thead className="bg-slate-50 uppercase font-bold text-[10px] text-slate-400">
-                <tr>
-                  {columns.map(col => <th key={col} className="p-3 text-left">{col}</th>)}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {data.slice(0, 10).map((row, i) => (
-                  <tr key={i}>
-                    {columns.map(col => <td key={col} className="p-3">{row[col] ?? '-'}</td>)}
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs text-slate-600">
+                <thead className="bg-slate-50 uppercase font-bold text-[10px] text-slate-400 whitespace-nowrap">
+                  <tr>
+                    <th className="p-3 text-center w-10">No</th>
+                    {columns.map(col => <th key={col} className="p-3 text-left whitespace-nowrap">{col}</th>)}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-            {data.length > 10 && <p className="text-slate-400 text-xs mt-4">... dan {data.length - 10} baris lainnya</p>}
+                </thead>
+                <tbody className="divide-y divide-slate-100 whitespace-nowrap">
+                  {data.slice(0, 15).map((row, i) => (
+                    <tr key={i} className="hover:bg-slate-50/50">
+                      <td className="p-3 text-center text-slate-400 font-mono text-[11px]">{i + 1}</td>
+                      {columns.map(col => {
+                        const val = row[col] ?? '-';
+                        let badgeClass = "";
+                        if (val === "H") badgeClass = "bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded";
+                        else if (val === "S") badgeClass = "bg-amber-100 text-amber-800 font-bold px-1.5 py-0.5 rounded";
+                        else if (val === "I") badgeClass = "bg-blue-100 text-blue-800 font-bold px-1.5 py-0.5 rounded";
+                        else if (val === "A") badgeClass = "bg-rose-100 text-rose-800 font-bold px-1.5 py-0.5 rounded";
+                        else if (val === "TM") badgeClass = "bg-slate-200 text-slate-700 font-bold px-1.5 py-0.5 rounded";
+
+                        return (
+                          <td key={col} className="p-3 whitespace-nowrap">
+                            {badgeClass ? <span className={badgeClass}>{val}</span> : val}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {data.length > 15 && <p className="text-slate-400 text-xs mt-4">... dan {data.length - 15} baris siswa lainnya</p>}
           </div>
-          <div className="p-5 border-t border-slate-100 flex justify-end gap-3">
-            <button onClick={onClose} className="px-4 py-2 text-slate-600 font-bold text-xs hover:bg-slate-100 rounded-xl">Batal</button>
-            <button onClick={() => onConfirm('xlsx')} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700">
-              <FileSpreadsheet size={14} /> Download XLSX
+          <div className="p-5 border-t border-slate-100 flex flex-wrap justify-end gap-3">
+            <button onClick={onClose} className="px-4 py-2 text-slate-600 font-bold text-xs hover:bg-slate-100 rounded-xl cursor-pointer">Batal</button>
+            <button onClick={() => onConfirm('xlsx')} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 cursor-pointer shadow-sm">
+              <FileSpreadsheet size={14} /> Unduh Excel (.XLSX)
             </button>
-            <button onClick={() => onConfirm('pdf')} className="flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-xl text-xs font-bold hover:bg-rose-700">
-              <FileText size={14} /> Download PDF
+            <button onClick={() => onConfirm('pdf')} className="flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-xl text-xs font-bold hover:bg-rose-700 cursor-pointer shadow-sm">
+              <FileText size={14} /> Unduh File PDF (.PDF)
+            </button>
+            <button onClick={() => onConfirm('print')} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 cursor-pointer shadow-sm">
+              <Printer size={14} /> Cetak Langsung
             </button>
           </div>
         </motion.div>

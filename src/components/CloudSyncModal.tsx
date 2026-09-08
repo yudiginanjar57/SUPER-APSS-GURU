@@ -23,7 +23,8 @@ import {
 import { 
   getDeviceLabel, 
   generateQrCodeDataUrl, 
-  GuruSyncPayload 
+  GuruSyncPayload,
+  isFirestoreQuotaExceeded
 } from "../lib/firestoreSync";
 
 export interface SyncLogEntry {
@@ -172,15 +173,15 @@ export default function CloudSyncModal({
                 <div>
                   <div className="flex items-center gap-2">
                     <h2 className="text-base sm:text-lg font-black tracking-tight text-white">
-                      Sinkronisasi Firestore (HP ⇄ Laptop)
+                      Sinkronisasi & Cadangan Cloud
                     </h2>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Live Realtime
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-indigo-500/30 text-indigo-200 border border-indigo-400/30 flex items-center gap-1">
+                      <Cloud size={11} />
+                      Manual Sync & Backup
                     </span>
                   </div>
                   <p className="text-xs text-indigo-200/90 font-medium">
-                    Edit di HP langsung berubah di laptop secara instan & tanpa batas
+                    Unggah dan tarik data secara aman antara HP & Laptop dengan Kode Sinkronisasi
                   </p>
                 </div>
               </div>
@@ -204,49 +205,54 @@ export default function CloudSyncModal({
                 </div>
               )}
 
-              {/* Realtime Status Card */}
+              {/* Status Card */}
               <div className="p-4 rounded-2xl bg-gradient-to-br from-slate-50 to-indigo-50/50 border border-indigo-100/80 space-y-3 shadow-xs">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex items-center gap-2.5">
                     <div className={`w-3 h-3 rounded-full ${
                       realtimeSyncStatus === "syncing" 
                         ? "bg-amber-500 animate-spin" 
-                        : isRealtimeSyncEnabled 
-                        ? "bg-emerald-500 ring-4 ring-emerald-100 animate-pulse" 
-                        : "bg-slate-400"
+                        : "bg-indigo-600"
                     }`} />
                     <div>
                       <div className="font-extrabold text-sm text-slate-900 flex items-center gap-1.5">
-                        <span>Status: {isRealtimeSyncEnabled ? "Realtime Cloud Aktif" : "Non-aktif"}</span>
+                        <span>Mode: Manual Sync & Cloud Backup</span>
                         {realtimeSyncStatus === "syncing" && (
                           <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
-                            Sedang Sinkronisasi...
+                            Sedang Memproses...
                           </span>
                         )}
                       </div>
                       <div className="text-[11px] text-slate-500 font-medium">
                         Perangkat Anda: <strong className="text-indigo-950 font-bold">{deviceLabel}</strong>
                         {lastSyncTime && (
-                          <span> • Update: {lastSyncTime} {lastUpdatedBy ? `(${lastUpdatedBy})` : ""}</span>
+                          <span> • Terakhir Terhubung: {lastSyncTime} {lastUpdatedBy ? `(${lastUpdatedBy})` : ""}</span>
                         )}
                       </div>
                     </div>
                   </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => onToggleRealtimeSync(!isRealtimeSyncEnabled)}
-                      className={`px-3 py-1.5 rounded-xl font-extrabold text-xs transition-all cursor-pointer border flex items-center gap-1.5 ${
-                        isRealtimeSyncEnabled 
-                          ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700 shadow-xs" 
-                          : "bg-slate-200 text-slate-700 border-slate-300 hover:bg-slate-300"
-                      }`}
-                    >
-                      <Radio size={14} className={isRealtimeSyncEnabled ? "animate-pulse" : ""} />
-                      {isRealtimeSyncEnabled ? "Auto-Sync Nyala" : "Nyalakan Auto-Sync"}
-                    </button>
-                  </div>
                 </div>
+
+                {/* Cloud Protection Info */}
+                <div className="p-2.5 bg-indigo-50/80 border border-indigo-200/80 rounded-xl text-[11px] text-indigo-950 flex items-center gap-2">
+                  <ShieldCheck size={16} className="text-indigo-600 shrink-0" />
+                  <span>
+                    <strong>Aturan Data Paling Mutakhir:</strong> Perangkat mana saja yang menulis/memperbarui data paling akhir (waktu terbaru), data tersebut yang akan selalu dimuat di semua perangkat. Data lama tidak akan pernah menimpa data yang lebih baru.
+                  </span>
+                </div>
+
+                {/* Quota Exceeded Notice */}
+                {isFirestoreQuotaExceeded() && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 flex items-start gap-2.5">
+                    <Info size={18} className="text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-bold">Batas Kuota Harian Cloud Firestore Tercapai</div>
+                      <p className="mt-0.5 text-amber-800 text-[11px] leading-relaxed">
+                        Layanan Cloud Firestore (free tier) telah mencapai batas penulisan hari ini. Seluruh data Anda saat ini <strong>tetap aman tersimpan di penyimpanan perangkat ini</strong>. Anda dapat mengunduh berkas offline melalui tombol <strong>Unduh Cadangan (File JSON)</strong> di tab Backup.
+                      </p>
+                    </div>
+                  </div>
+                )}
 
                 {/* Quick Data Count */}
                 <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 pt-2 border-t border-indigo-100/60 text-center">
@@ -437,7 +443,7 @@ export default function CloudSyncModal({
               {/* Sync Activity Logs */}
               <div className="space-y-2">
                 <h4 className="font-extrabold text-xs text-slate-700 uppercase tracking-wider flex items-center justify-between">
-                  <span>Riwayat Sinkronisasi Realtime</span>
+                  <span>Riwayat Aktivitas Sinkronisasi</span>
                   <span className="text-[10px] text-slate-400 font-normal">{syncLogs.length} aktivitas tercatat</span>
                 </h4>
                 

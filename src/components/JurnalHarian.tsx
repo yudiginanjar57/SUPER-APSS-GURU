@@ -41,6 +41,13 @@ interface JurnalHarianProps {
     subject: string;
     month: string;
     weekNum: string;
+    institution?: string;
+    headmasterName?: string;
+    headmasterNip?: string;
+    headmasterRank?: string;
+    documentCity?: string;
+    schoolNpsn?: string;
+    academicYear?: string;
   };
 }
 
@@ -80,15 +87,20 @@ export default function JurnalHarian({
   const todayStr = new Date().toISOString().split("T")[0];
   const [date, setDate] = useState<string>(todayStr);
   const [selectedClasses, setSelectedClasses] = useState<string[]>([]);
-  const [topic, setTopic] = useState("Upacara Bendera & Refleksi Pembelajaran Ekonomi");
+  const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
   const [isClassDropdownOpen, setIsClassDropdownOpen] = useState<boolean>(false);
+  const [isTopicDropdownOpen, setIsTopicDropdownOpen] = useState<boolean>(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const topicDropdownRef = useRef<HTMLDivElement>(null);
 
   // Close dropdown on outside click
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setIsClassDropdownOpen(false);
+      }
+      if (topicDropdownRef.current && !topicDropdownRef.current.contains(event.target as Node)) {
+        setIsTopicDropdownOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -117,26 +129,10 @@ export default function JurnalHarian({
   const [photos, setPhotos] = useState<string[]>([]);
 
   // Description text area (pre-filled with the exact text from the image for ease of use)
-  const [descriptionText, setDescriptionText] = useState(
-    `Melaksanakan kegiatan dinas sekolah:
-1. Melaksanakan kegiatan upacara bendera
-2. Melaksanakan Rapat Dinas Awal semester 2
-
-Melaksanakan Kegiatan Pembelajaran Ekonomi:
-1. Kelas XI D4
-   - Berdoa sebelum belajar
-   - Melakukan kegiatan refleksi pembelajaran ekonomi SMT 1
-   - Menyampaikan rencana kegiatan belajar mengajar pelajaran Ekonomi Semester 2
-2. Kelas XI C1
-   - Berdoa sebelum belajar
-   - Melakukan kegiatan refleksi pembelajaran ekonomi SMT 1
-   - Menyampaikan rencana kegiatan belajar mengajar pelajaran Ekonomi Semester 2`
-  );
-
-  // Evaluation and reflection fields
-  const [summary, setSummary] = useState("Melaksanakan kegiatan dinas upacara bendera, rapat dinas guru awal semester 2, serta memulai proses refleksi pembelajaran semester 1 dan sosialisasi rencana belajar semester 2.");
-  const [reflection, setReflection] = useState("Siswa bersemangat mengikuti upacara dan kegiatan belajar awal semester. Refleksi membantu memetakan materi yang masih membingungkan dari semester lalu.");
-  const [nextSteps, setNextSteps] = useState("Melanjutkan materi inti Ekonomi Semester 2 pada pertemuan berikutnya.");
+  const [descriptionText, setDescriptionText] = useState("");
+  const [summary, setSummary] = useState("");
+  const [reflection, setReflection] = useState("");
+  const [nextSteps, setNextSteps] = useState("");
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [exportingId, setExportingId] = useState<string | null>(null);
@@ -147,26 +143,12 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
     setEditingJournalId(null);
     setDate(new Date().toISOString().split("T")[0]);
     setSelectedClasses([]);
-    setTopic("Upacara Bendera & Refleksi Pembelajaran Ekonomi");
+    setSelectedTopics([]);
     setPhotos([]);
-    setDescriptionText(
-      `Melaksanakan kegiatan dinas sekolah:
-1. Melaksanakan kegiatan upacara bendera
-2. Melaksanakan Rapat Dinas Awal semester 2
-
-Melaksanakan Kegiatan Pembelajaran Ekonomi:
-1. Kelas XI D4
-   - Berdoa sebelum belajar
-   - Melakukan kegiatan refleksi pembelajaran ekonomi SMT 1
-   - Menyampaikan rencana kegiatan belajar mengajar pelajaran Ekonomi Semester 2
-2. Kelas XI C1
-   - Berdoa sebelum belajar
-   - Melakukan kegiatan refleksi pembelajaran ekonomi SMT 1
-   - Menyampaikan rencana kegiatan belajar mengajar pelajaran Ekonomi Semester 2`
-    );
-    setSummary("Melaksanakan kegiatan dinas upacara bendera, rapat dinas guru awal semester 2, serta memulai proses refleksi pembelajaran semester 1 dan sosialisasi rencana belajar semester 2.");
-    setReflection("Siswa bersemangat mengikuti upacara dan kegiatan belajar awal semester. Refleksi membantu memetakan materi yang masih membingungkan dari semester lalu.");
-    setNextSteps("Melanjutkan materi inti Ekonomi Semester 2 pada pertemuan berikutnya.");
+    setDescriptionText("");
+    setSummary("");
+    setReflection("");
+    setNextSteps("");
     setErrorMsg(null);
   };
 
@@ -207,8 +189,8 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
     setPhotos(photos.filter((_, i) => i !== index));
   };
 
-  // Render photo grid helper (handles 1 to 6 photos arranged vertically / stacked downwards)
-  const renderDocumentPhotoGrid = (photosList: string[]) => {
+  // Render photo grid helper (handles 1 to 6 photos arranged compactly in a grid so output never gets cut off)
+  const renderDocumentPhotoGrid = (photosList: string[], timestamps?: string[]) => {
     if (!photosList || photosList.length === 0) {
       return (
         <div className="border border-slate-200 border-dashed rounded-xl p-4 text-center text-slate-400 flex flex-col items-center justify-center min-h-[140px]">
@@ -218,10 +200,111 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
       );
     }
 
+    const count = photosList.length;
+
+    if (count === 1) {
+      return (
+        <div className="w-full mx-auto py-1">
+          <div className="relative w-full h-[180px] rounded-lg overflow-hidden border border-slate-300 bg-slate-50 shadow-2xs">
+            <img 
+              src={photosList[0]} 
+              alt="Foto Dokumentasi 1" 
+              className="w-full h-full object-cover"
+              crossOrigin="anonymous"
+              referrerPolicy="no-referrer"
+            />
+            {timestamps && timestamps[0] && (
+              <span className="absolute bottom-1.5 left-1.5 bg-black/75 text-white font-mono text-[9px] font-bold px-1.5 py-0.5 rounded shadow-xs">
+                {timestamps[0]}
+              </span>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    if (count === 2) {
+      return (
+        <div className="grid grid-cols-2 gap-1.5 w-full mx-auto py-1">
+          {photosList.map((photo, pIdx) => (
+            <div key={pIdx} className="relative w-full h-[120px] rounded-lg overflow-hidden border border-slate-300 bg-slate-50 shadow-2xs">
+              <img 
+                src={photo} 
+                alt={`Foto Dokumentasi ${pIdx + 1}`} 
+                className="w-full h-full object-cover"
+                crossOrigin="anonymous"
+                referrerPolicy="no-referrer"
+              />
+              {timestamps && timestamps[pIdx] && (
+                <span className="absolute bottom-1 left-1 bg-black/75 text-white font-mono text-[8px] font-bold px-1 py-0.5 rounded">
+                  {timestamps[pIdx]}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    if (count === 3) {
+      return (
+        <div className="grid grid-cols-2 gap-1.5 w-full mx-auto py-1">
+          {photosList.map((photo, pIdx) => {
+            const isLast = pIdx === 2;
+            return (
+              <div 
+                key={pIdx} 
+                className={`relative w-full rounded-lg overflow-hidden border border-slate-300 bg-slate-50 shadow-2xs ${
+                  isLast ? "col-span-2 h-[115px]" : "h-[105px]"
+                }`}
+              >
+                <img 
+                  src={photo} 
+                  alt={`Foto Dokumentasi ${pIdx + 1}`} 
+                  className="w-full h-full object-cover"
+                  crossOrigin="anonymous"
+                  referrerPolicy="no-referrer"
+                />
+                {timestamps && timestamps[pIdx] && (
+                  <span className="absolute bottom-1 left-1 bg-black/75 text-white font-mono text-[8px] font-bold px-1 py-0.5 rounded">
+                    {timestamps[pIdx]}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    if (count === 4) {
+      return (
+        <div className="grid grid-cols-2 gap-1.5 w-full mx-auto py-1">
+          {photosList.map((photo, pIdx) => (
+            <div key={pIdx} className="relative w-full h-[100px] rounded-lg overflow-hidden border border-slate-300 bg-slate-50 shadow-2xs">
+              <img 
+                src={photo} 
+                alt={`Foto Dokumentasi ${pIdx + 1}`} 
+                className="w-full h-full object-cover"
+                crossOrigin="anonymous"
+                referrerPolicy="no-referrer"
+              />
+              {timestamps && timestamps[pIdx] && (
+                <span className="absolute bottom-1 left-1 bg-black/75 text-white font-mono text-[8px] font-bold px-1 py-0.5 rounded">
+                  {timestamps[pIdx]}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // 5 or 6 photos: 3 column grid
     return (
-      <div className="flex flex-col gap-3 w-full max-w-[420px] mx-auto py-1">
+      <div className="grid grid-cols-3 gap-1.5 w-full mx-auto py-1">
         {photosList.map((photo, pIdx) => (
-          <div key={pIdx} className="relative w-full aspect-[16/10] rounded-xl overflow-hidden border border-slate-200 bg-slate-50 shadow-xs">
+          <div key={pIdx} className="relative w-full h-[90px] rounded-lg overflow-hidden border border-slate-300 bg-slate-50 shadow-2xs">
             <img 
               src={photo} 
               alt={`Foto Dokumentasi ${pIdx + 1}`} 
@@ -229,6 +312,11 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
               crossOrigin="anonymous"
               referrerPolicy="no-referrer"
             />
+            {timestamps && timestamps[pIdx] && (
+              <span className="absolute bottom-1 left-1 bg-black/75 text-white font-mono text-[8px] font-bold px-1 py-0.5 rounded">
+                {timestamps[pIdx]}
+              </span>
+            )}
           </div>
         ))}
       </div>
@@ -247,7 +335,13 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
       setSelectedClasses(["XI D4", "XI C1"]);
     }
 
-    setTopic(journal.topic || "");
+    if (journal.topic) {
+      const splitTopics = journal.topic.split(", ").map(t => t.trim()).filter(Boolean);
+      setSelectedTopics(splitTopics.length > 0 ? splitTopics : [journal.topic]);
+    } else {
+      setSelectedTopics([]);
+    }
+
     setDescriptionText(journal.descriptionText || "");
     setSummary(journal.summary || "");
     setReflection(journal.reflection || "");
@@ -267,7 +361,9 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
   // Submit Journal Entry to parent state
   const handleSaveJournal = (e: FormEvent) => {
     e.preventDefault();
-    if (!topic.trim() || !descriptionText.trim()) {
+    const finalTopic = selectedTopics.length > 0 ? selectedTopics.join(", ") : "";
+
+    if (!finalTopic.trim() || !descriptionText.trim()) {
       setErrorMsg("Topik Pembelajaran dan Deskripsi Kegiatan wajib diisi!");
       return;
     }
@@ -279,7 +375,7 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
         id: editingJournalId,
         date,
         className: classNameCombined,
-        topic,
+        topic: finalTopic,
         notes: "",
         summary,
         reflection,
@@ -301,7 +397,7 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
         id: `jurnal-${Date.now()}`,
         date,
         className: classNameCombined,
-        topic,
+        topic: finalTopic,
         notes: "",
         summary,
         reflection,
@@ -356,18 +452,46 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
         allowTaint: true
       });
 
-      const imgData = canvas.toDataURL("image/jpeg", 1.0);
+      const imgData = canvas.toDataURL("image/jpeg", 0.98);
       const pdf = new jsPDF({
         orientation: "landscape",
         unit: "mm",
         format: "a4"
       });
 
-      const imgWidth = 297; // A4 landscape size width
-      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      const pdfPageWidth = 297; // A4 landscape size width (mm)
+      const pdfPageHeight = 210; // A4 landscape size height (mm)
 
-      // Fit beautifully on A4 or add extra pages if very long
-      pdf.addImage(imgData, "JPEG", 0, 0, imgWidth, imgHeight, undefined, "FAST");
+      let renderedWidth = pdfPageWidth;
+      let renderedHeight = (canvas.height * pdfPageWidth) / canvas.width;
+
+      // If renderedHeight is slightly greater than 210mm (up to 245mm),
+      // auto-scale proportionally so everything fits on 1 page cleanly without truncation
+      if (renderedHeight > pdfPageHeight && renderedHeight <= 245) {
+        const scaleFactor = (pdfPageHeight - 8) / renderedHeight;
+        renderedWidth = pdfPageWidth * scaleFactor;
+        renderedHeight = renderedHeight * scaleFactor;
+        const xOffset = (pdfPageWidth - renderedWidth) / 2;
+        const yOffset = (pdfPageHeight - renderedHeight) / 2;
+        pdf.addImage(imgData, "JPEG", xOffset, yOffset, renderedWidth, renderedHeight, undefined, "FAST");
+      } else if (renderedHeight <= pdfPageHeight) {
+        // Fits perfectly on 1 page
+        pdf.addImage(imgData, "JPEG", 0, 0, renderedWidth, renderedHeight, undefined, "FAST");
+      } else {
+        // Multi-page export if content is longer
+        let heightLeft = renderedHeight;
+        let position = 0;
+
+        pdf.addImage(imgData, "JPEG", 0, position, renderedWidth, renderedHeight, undefined, "FAST");
+        heightLeft -= pdfPageHeight;
+
+        while (heightLeft > 0) {
+          position -= pdfPageHeight;
+          pdf.addPage();
+          pdf.addImage(imgData, "JPEG", 0, position, renderedWidth, renderedHeight, undefined, "FAST");
+          heightLeft -= pdfPageHeight;
+        }
+      }
       
       pdf.save(`Jurnal_${journal.subject || "Ekonomi"}_Minggu_${journal.weekNum || "2"}_${journal.date}.pdf`);
     } catch (err: any) {
@@ -533,7 +657,7 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
 
                                   {/* Photo Documentation Multi-Image Panel */}
                                   <td className="p-3 border-r border-black bg-white w-[38%]">
-                                    {renderDocumentPhotoGrid(currentPhotos)}
+                                    {renderDocumentPhotoGrid(currentPhotos, journal.photoTimestamps)}
                                   </td>
 
                                   {/* Description of Activities list with Justify align */}
@@ -543,6 +667,32 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
                                 </tr>
                               </tbody>
                             </table>
+                          </div>
+
+                          {/* Signatures Section for Official Document Print */}
+                          <div className="flex justify-between items-start mt-6 text-xs font-bold text-black px-4">
+                            <div className="text-center min-w-[200px]">
+                              <p>Mengetahui,<br />Kepala Sekolah</p>
+                              <div className="mt-12 font-bold">
+                                {teacherProfile?.headmasterName || "Dr. Hj. Yanti Suryanti, M.Pd."}
+                                <br />
+                                <span className="font-normal text-[11px]">NIP. {teacherProfile?.headmasterNip || "197005121995122001"}</span>
+                                {teacherProfile?.headmasterRank && (
+                                  <>
+                                    <br />
+                                    <span className="font-normal text-[10px] text-slate-700">{teacherProfile.headmasterRank}</span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-center min-w-[200px]">
+                              <p>{teacherProfile?.documentCity || "Tasikmalaya"}, {formattedDate}<br />Guru Mata Pelajaran</p>
+                              <div className="mt-12 font-bold">
+                                {currentTeacher}
+                                <br />
+                                <span className="font-normal text-[11px]">NIP. {currentNip}</span>
+                              </div>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -668,7 +818,7 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
 
                                         {/* Photo Documentation Multi-Image Panel */}
                                         <td className="p-3 border-r border-black bg-white w-[38%]">
-                                          {renderDocumentPhotoGrid(currentPhotos)}
+                                          {renderDocumentPhotoGrid(currentPhotos, journal.photoTimestamps)}
                                         </td>
 
                                         {/* Description of Activities list with Justify align */}
@@ -678,6 +828,32 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
                                       </tr>
                                     </tbody>
                                   </table>
+                                </div>
+
+                                {/* Signatures Section for Visual Preview */}
+                                <div className="flex justify-between items-start mt-6 text-xs font-bold text-slate-800 px-4">
+                                  <div className="text-center min-w-[200px]">
+                                    <p>Mengetahui,<br />Kepala Sekolah</p>
+                                    <div className="mt-12 font-bold">
+                                      {teacherProfile?.headmasterName || "Dr. Hj. Yanti Suryanti, M.Pd."}
+                                      <br />
+                                      <span className="font-normal text-[11px] text-slate-500">NIP. {teacherProfile?.headmasterNip || "197005121995122001"}</span>
+                                      {teacherProfile?.headmasterRank && (
+                                        <>
+                                          <br />
+                                          <span className="font-normal text-[10px] text-slate-400">{teacherProfile.headmasterRank}</span>
+                                        </>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="text-center min-w-[200px]">
+                                    <p>{teacherProfile?.documentCity || "Tasikmalaya"}, {formattedDate}<br />Guru Mata Pelajaran</p>
+                                    <div className="mt-14 font-bold">
+                                      {currentTeacher}
+                                      <br />
+                                      <span className="font-normal text-[11px] text-slate-500">NIP. {currentNip}</span>
+                                    </div>
+                                  </div>
                                 </div>
                               </div>
                             </div>
@@ -845,6 +1021,14 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
                                   setSelectedClasses(selectedClasses.filter(c => c !== cls));
                                 } else {
                                   setSelectedClasses([...selectedClasses, cls]);
+                                  
+                                  // Auto-fill description text
+                                  setDescriptionText(prev => {
+                                    const prefix = prev.trim() === "" ? "" : "\n\n";
+                                    const numbering = selectedClasses.length + 1;
+                                    const newText = `${prefix}${numbering}. Kelas ${cls}\n   - Berdoa Sebelum belajar\n   - Menyampaikan tujuan pembelajaran\n   - `;
+                                    return prev + newText;
+                                  });
                                 }
                               }}
                               className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
@@ -864,15 +1048,47 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
                     )}
                   </div>
 
-                  <div className="space-y-1">
+                  <div className="space-y-1 relative" ref={topicDropdownRef}>
                     <label className="text-[9px] font-black text-slate-400 uppercase">Topik Utama</label>
-                    <input
-                      type="text"
-                      value={topic}
-                      onChange={(e) => setTopic(e.target.value)}
-                      placeholder="cth: Refleksi Pembelajaran Ekonomi"
-                      className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-indigo-400 text-slate-700 font-semibold"
-                    />
+                    <div 
+                      onClick={() => setIsTopicDropdownOpen(!isTopicDropdownOpen)}
+                      className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-indigo-400 text-slate-700 font-semibold cursor-pointer flex items-center justify-between min-h-[34px]"
+                    >
+                      <span className="truncate">
+                        {selectedTopics.length > 0 ? selectedTopics.join(", ") : "Pilih Topik..."}
+                      </span>
+                      <ChevronDown size={14} className={`text-slate-400 transition-transform ${isTopicDropdownOpen ? "rotate-180" : ""}`} />
+                    </div>
+
+                    {isTopicDropdownOpen && (
+                      <div className="absolute z-50 mt-1 w-full bg-white border border-slate-200 rounded-xl shadow-lg p-2 space-y-1 max-h-48 overflow-y-auto">
+                        {["Kegiatan Pembelajaran", "Kegiatan Dinas Sekolah", "Kegiatan Luar Sekolah"].map((topicOption) => {
+                          const isSelected = selectedTopics.includes(topicOption);
+                          return (
+                            <div
+                              key={topicOption}
+                              onClick={() => {
+                                if (isSelected) {
+                                  setSelectedTopics(selectedTopics.filter(t => t !== topicOption));
+                                } else {
+                                  setSelectedTopics([...selectedTopics, topicOption]);
+                                }
+                              }}
+                              className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
+                                isSelected ? "bg-indigo-50 text-indigo-700 font-bold" : "hover:bg-slate-50 text-slate-700"
+                              }`}
+                            >
+                              <span>{topicOption}</span>
+                              <div className={`w-4 h-4 rounded border flex items-center justify-center text-[10px] ${
+                                isSelected ? "bg-indigo-600 border-indigo-600 text-white" : "border-slate-300 bg-white"
+                              }`}>
+                                {isSelected ? "✓" : ""}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1084,7 +1300,7 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
                               {formattedDate}
                             </td>
                             <td className="p-3 border-r border-black bg-white w-[38%]">
-                              {renderDocumentPhotoGrid(currentPhotos)}
+                              {renderDocumentPhotoGrid(currentPhotos, previewJournal.photoTimestamps)}
                             </td>
                             <td className="p-4 whitespace-pre-line text-xs font-medium text-black leading-relaxed text-justify" style={{ textAlign: "justify" }}>
                               {currentDesc}
@@ -1092,6 +1308,32 @@ Melaksanakan Kegiatan Pembelajaran Ekonomi:
                           </tr>
                         </tbody>
                       </table>
+                    </div>
+
+                    {/* Signatures Section for Modal Document Preview */}
+                    <div className="flex justify-between items-start mt-6 text-xs font-bold text-black px-4">
+                      <div className="text-center min-w-[200px]">
+                        <p>Mengetahui,<br />Kepala Sekolah</p>
+                        <div className="mt-12 font-bold">
+                          {teacherProfile?.headmasterName || "Dr. Hj. Yanti Suryanti, M.Pd."}
+                          <br />
+                          <span className="font-normal text-[11px] text-slate-600">NIP. {teacherProfile?.headmasterNip || "197005121995122001"}</span>
+                          {teacherProfile?.headmasterRank && (
+                            <>
+                              <br />
+                              <span className="font-normal text-[10px] text-slate-500">{teacherProfile.headmasterRank}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-center min-w-[200px]">
+                        <p>{teacherProfile?.documentCity || "Tasikmalaya"}, {formattedDate}<br />Guru Mata Pelajaran</p>
+                        <div className="mt-14 font-bold">
+                          {currentTeacher}
+                          <br />
+                          <span className="font-normal text-[11px] text-slate-600">NIP. {currentNip}</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>

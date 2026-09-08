@@ -16,6 +16,9 @@ import {
   X,
   FileCheck2,
   Settings,
+  Upload,
+  FileText,
+  Image as ImageIcon,
   Plus,
   Trash2,
   Edit3,
@@ -28,6 +31,7 @@ import {
   CheckCircle2,
   FileType,
   ShieldCheck,
+  ShieldAlert,
   Camera,
   Bot,
   RefreshCw,
@@ -39,11 +43,13 @@ import {
   Zap,
   Activity,
   Sparkles,
-  RotateCcw
+  RotateCcw,
+  MonitorPlay
 } from "lucide-react";
 
 // Import types and presets
 import { 
+  QuestionBankItem,
   Student, 
   Attendance, 
   ScheduleItem, 
@@ -52,7 +58,9 @@ import {
   StudentGrade, 
   JournalEntry,
   HomeroomNote,
-  HomeVisitReport
+  HomeVisitReport,
+  LearningMaterial,
+  LearningMaterialNote
 } from "./types";
 
 import { 
@@ -64,15 +72,21 @@ import {
   PRESET_GRADES, 
   PRESET_JOURNAL 
 } from "./data/presets";
+import { PRESET_LEARNING_MATERIALS } from "./data/presetMaterials";
+import { useGoogleLogin } from '@react-oauth/google';
+import { uploadBackupToDrive, listDriveBackups, downloadDriveBackup, pruneOldDriveBackups, DriveBackupItem } from "./lib/driveSync";
+import { formatDriveImageUrl } from "./lib/driveUtils";
 
 // Import Firebase Firestore Realtime Multi-Device Sync & Daily Backups
 import { 
   saveGuruDataToFirestore, 
   subscribeToGuruRealtimeData, 
   fetchGuruDataFromFirestore,
+  fetchLatestGuruDataFromCloud,
   saveDailyBackupToFirestore,
   fetchDailyBackupHistoryFromFirestore,
   restoreDailyBackupFromFirestore,
+  isFirestoreQuotaExceeded,
   DailyBackupItem,
   GuruSyncPayload,
   getDeviceLabel
@@ -81,6 +95,7 @@ import CloudSyncModal, { SyncLogEntry } from "./components/CloudSyncModal";
 
 import { safeStorage } from "./lib/safeStorage";
 import { compressImage } from "./lib/imageUtils";
+import { getLocalDateString } from "./lib/dateUtils";
 
 // Import modular child components
 import Dashboard from "./components/Dashboard";
@@ -92,8 +107,30 @@ import DaftarNilai from "./components/DaftarNilai";
 import JurnalHarian from "./components/JurnalHarian";
 import WaliKelas from "./components/WaliKelas";
 import EduAsisten from "./components/EduAsisten";
+import RuangBelajar from "./components/RuangBelajar";
+import EvaluasiSiswa from "./components/EvaluasiSiswa";
+import BankSoal from "./components/BankSoal";
+import VerifikasiPengguna from "./components/VerifikasiPengguna";
+import StudentDashboard from "./components/StudentDashboard";
+import PengaturanSiswaModal from "./components/PengaturanSiswa";
+
+import { subscribeToAuthChanges, signOut, AppUser } from "./lib/firebase";
+import Login from "./components/Login";
+import { Loader2, LogOut } from "lucide-react";
 
 export default function App() {
+  // Auth state
+  const [user, setUser] = useState<AppUser | null>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToAuthChanges((currentUser) => {
+      setUser(currentUser);
+      setIsAuthChecking(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
   // Navigation & UI States
   const [activeTab, setActiveTab] = useState<string>("dashboard");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -115,9 +152,91 @@ export default function App() {
   const [institution, setInstitution] = useState<string>(() => {
     return safeStorage.getItem("guru_institution") || "Pemerintah Provinsi Jawa Barat\nSMA Negeri 2 Tasikmalaya";
   });
+  const [headmasterName, setHeadmasterName] = useState<string>(() => {
+    return safeStorage.getItem("guru_headmaster_name") || "Dr. Hj. Yanti Suryanti, M.Pd.";
+  });
+  const [headmasterNip, setHeadmasterNip] = useState<string>(() => {
+    return safeStorage.getItem("guru_headmaster_nip") || "197005121995122001";
+  });
+  const [headmasterRank, setHeadmasterRank] = useState<string>(() => {
+    return safeStorage.getItem("guru_headmaster_rank") || "Pembina Utama Muda, IV/c";
+  });
+  const [documentCity, setDocumentCity] = useState<string>(() => {
+    return safeStorage.getItem("guru_document_city") || "Tasikmalaya";
+  });
+  const [schoolNpsn, setSchoolNpsn] = useState<string>(() => {
+    return safeStorage.getItem("guru_school_npsn") || "20224510";
+  });
+  const [academicYear, setAcademicYear] = useState<string>(() => {
+    return safeStorage.getItem("guru_academic_year") || "2025/2026 (Semester Genap)";
+  });
   const [profilePhoto, setProfilePhoto] = useState<string>(() => {
     return safeStorage.getItem("guru_profile_photo") || "";
   });
+
+  // Kop Surat States
+  const [useKop, setUseKop] = useState<boolean>(() => {
+    const saved = safeStorage.getItem("guru_kop_enabled");
+    return saved === null ? true : saved === "true";
+  });
+  const [kopType, setKopType] = useState<"manual" | "image">(() => {
+    const saved = safeStorage.getItem("guru_kop_type");
+    return (saved === "manual" || saved === "image") ? saved : "manual";
+  });
+  const [kopManual, setKopManual] = useState(() => {
+    const saved = safeStorage.getItem("guru_kop_manual");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Failed to parse saved kop manual:", e);
+      }
+    }
+    return {
+      line1: "PEMERINTAH PROVINSI JAWA BARAT",
+      line2: "DINAS PENDIDIKAN",
+      line3: "SMA NEGERI 2 TASIKMALAYA",
+      line4: "Jl. Ir. H. Juanda No. 93, Coblong, Kota Bandung | Telp: (022) 250123",
+      line5: "Website: www.sman2tasikmalaya.sch.id | Email: info@sman2tasikmalaya.sch.id"
+    };
+  });
+  const [kopImage, setKopImage] = useState<string>(() => {
+    return safeStorage.getItem("guru_kop_image") || "";
+  });
+  const [kopLogo, setKopLogo] = useState<string>(() => {
+    return safeStorage.getItem("guru_kop_logo") || "";
+  });
+  const [kopLogoPosition, setKopLogoPosition] = useState<"left" | "right" | "both" | "none">(() => {
+    return (safeStorage.getItem("guru_kop_logo_position") as any) || "left";
+  });
+  const [kopLogoSize, setKopLogoSize] = useState<number>(() => {
+    const saved = safeStorage.getItem("guru_kop_logo_size");
+    return saved ? parseInt(saved, 10) : 55;
+  });
+
+  // Sync Kop Surat states to safeStorage
+  useEffect(() => {
+    safeStorage.setItem("guru_kop_enabled", useKop.toString());
+    safeStorage.setItem("guru_kop_type", kopType);
+    safeStorage.setItem("guru_kop_manual", JSON.stringify(kopManual));
+    safeStorage.setItem("guru_kop_image", kopImage);
+    safeStorage.setItem("guru_kop_logo", kopLogo);
+    safeStorage.setItem("guru_kop_logo_position", kopLogoPosition);
+    safeStorage.setItem("guru_kop_logo_size", kopLogoSize.toString());
+    
+    // Notify other components of the change
+    window.dispatchEvent(new CustomEvent("guru_kop_settings_changed"));
+  }, [useKop, kopType, kopManual, kopImage, kopLogo, kopLogoPosition, kopLogoSize]);
+
+  // Open profile settings listener
+  useEffect(() => {
+    const handleOpenProfile = () => {
+      setSettingsTab("profile");
+      setIsProfileModalOpen(true);
+    };
+    window.addEventListener("open_profile_settings", handleOpenProfile);
+    return () => window.removeEventListener("open_profile_settings", handleOpenProfile);
+  }, []);
 
   useEffect(() => {
     if (profilePhoto) {
@@ -145,11 +264,53 @@ export default function App() {
 
   // Settings & Management Modal State
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isStudentSettingsOpen, setIsStudentSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"profile" | "classes" | "students" | "reset" | "backup">("profile");
 
+  // App customization states (Logo & Theme)
+  const [appLogo, setAppLogo] = useState<string>(() => {
+    return safeStorage.getItem("app_logo_url") || "";
+  });
+  const [appTheme, setAppTheme] = useState<string>(() => {
+    return safeStorage.getItem("app_theme") || "classic-indigo";
+  });
+
+  useEffect(() => {
+    if (appLogo) {
+      safeStorage.setItem("app_logo_url", appLogo);
+    } else {
+      safeStorage.removeItem("app_logo_url");
+    }
+  }, [appLogo]);
+
+  useEffect(() => {
+    safeStorage.setItem("app_theme", appTheme);
+  }, [appTheme]);
+
   // Backup & Restore States
-  const [restoreSuccess, setRestoreSuccess] = useState(false);
-  const [restoreError, setRestoreError] = useState("");
+  const [restoreSuccessMsg, setRestoreSuccessMsg] = useState<string | null>(null);
+  const [restoreErrorMsg, setRestoreErrorMsg] = useState<string | null>(null);
+  const [isRestoringData, setIsRestoringData] = useState(false);
+  const [confirmRestoreModal, setConfirmRestoreModal] = useState<{
+    isOpen: boolean;
+    type: "cloud" | "file" | "drive";
+    backupItem?: DailyBackupItem;
+    driveItem?: DriveBackupItem;
+    fileData?: any;
+    fileName?: string;
+    details?: {
+      studentCount: number;
+      gradeCount: number;
+      journalCount: number;
+      classCount: number;
+      attendanceCount: number;
+      homeroomCount?: number;
+      homeVisitsCount?: number;
+      scheduleCount?: number;
+      assignmentCount?: number;
+      teacherName?: string;
+    };
+  } | null>(null);
 
   // Reset Data States
   const [resetDataChoices, setResetDataChoices] = useState({
@@ -193,7 +354,7 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Sync teacher profile to safeStorage
+  // Sync teacher and headmaster profile to safeStorage
   useEffect(() => {
     safeStorage.setItem("guru_name", teacherName);
     safeStorage.setItem("guru_nip", nip);
@@ -201,7 +362,13 @@ export default function App() {
     safeStorage.setItem("guru_month", currentMonth);
     safeStorage.setItem("guru_week", currentWeek);
     safeStorage.setItem("guru_institution", institution);
-  }, [teacherName, nip, subject, currentMonth, currentWeek, institution]);
+    safeStorage.setItem("guru_headmaster_name", headmasterName);
+    safeStorage.setItem("guru_headmaster_nip", headmasterNip);
+    safeStorage.setItem("guru_headmaster_rank", headmasterRank);
+    safeStorage.setItem("guru_document_city", documentCity);
+    safeStorage.setItem("guru_school_npsn", schoolNpsn);
+    safeStorage.setItem("guru_academic_year", academicYear);
+  }, [teacherName, nip, subject, currentMonth, currentWeek, institution, headmasterName, headmasterNip, headmasterRank, documentCity, schoolNpsn, academicYear]);
 
   // Helper to load stored state without forcing non-empty preset overrides when arrays are empty
   const loadStoredState = <T,>(key: string, fallback: T): T => {
@@ -216,6 +383,21 @@ export default function App() {
     }
   };
 
+  const sanitizeStudentsList = (rawList: Student[]): Student[] => {
+    if (!Array.isArray(rawList)) return [];
+    const seen = new Set<string>();
+    return rawList
+      .filter(Boolean)
+      .map((s, idx) => {
+        let id = s.id || `s-${Date.now()}-${idx}`;
+        if (seen.has(id)) {
+          id = `${id}_${idx}_${Math.random().toString(36).substring(2, 7)}`;
+        }
+        seen.add(id);
+        return { ...s, id };
+      });
+  };
+
   // Dynamic Class List & Student Model (Backed by safeStorage with safe non-empty fallback)
   const [classList, setClassList] = useState<string[]>(() => {
     return loadStoredState<string[]>("guru_classes", CLASSES);
@@ -223,30 +405,12 @@ export default function App() {
 
   const [students, setStudents] = useState<Student[]>(() => {
     const rawList = loadStoredState<Student[]>("guru_students", PRESET_STUDENTS);
-    const seen = new Set<string>();
-    return rawList.filter(s => {
-      if (!s || !s.id) return false;
-      if (seen.has(s.id)) return false;
-      seen.add(s.id);
-      return true;
-    });
+    return sanitizeStudentsList(rawList);
   });
 
   useEffect(() => {
     // Run deduplication once on mount to clear out any duplicate IDs in safeStorage or existing state
-    setStudents(prev => {
-      const seen = new Set<string>();
-      const unique = prev.filter(s => {
-        if (!s || !s.id) return false;
-        if (seen.has(s.id)) return false;
-        seen.add(s.id);
-        return true;
-      });
-      if (unique.length !== prev.length) {
-        return unique;
-      }
-      return prev;
-    });
+    setStudents(prev => sanitizeStudentsList(prev));
   }, []);
 
   useEffect(() => {
@@ -285,8 +449,15 @@ export default function App() {
     nip,
     subject,
     month: currentMonth,
-    weekNum: currentWeek
-  }), [teacherName, nip, subject, currentMonth, currentWeek]);
+    weekNum: currentWeek,
+    institution,
+    headmasterName,
+    headmasterNip,
+    headmasterRank,
+    documentCity,
+    schoolNpsn,
+    academicYear
+  }), [teacherName, nip, subject, currentMonth, currentWeek, institution, headmasterName, headmasterNip, headmasterRank, documentCity, schoolNpsn, academicYear]);
 
   const [schedule, setSchedule] = useState<ScheduleItem[]>(() => {
     return loadStoredState<ScheduleItem[]>("guru_schedule", PRESET_SCHEDULE);
@@ -310,6 +481,15 @@ export default function App() {
 
   const [attendanceList, setAttendanceList] = useState<Attendance[]>(() => {
     return safeStorage.getJSON<Attendance[]>("guru_attendance", []);
+  });
+
+  // Persistent attendance date and active class to ensure no reset during navigation
+  const [attendanceDate, setAttendanceDate] = useState<string>(() => {
+    return getLocalDateString();
+  });
+
+  const [attendanceClass, setAttendanceClass] = useState<string>(() => {
+    return safeStorage.getItem("guru_attendance_class") || "";
   });
 
   // Homeroom Teacher (Wali Kelas) States
@@ -351,6 +531,93 @@ export default function App() {
     return loadStoredState<HomeVisitReport[]>("guru_home_visits", defaultVisits);
   });
 
+  // E-Learning Ruang Belajar Media Materials State
+  const [bankQuestions, setBankQuestions] = useState<QuestionBankItem[]>(() => {
+    const defaultBank: QuestionBankItem[] = [
+      {
+        id: "qb-1",
+        type: "pg",
+        question: "Apakah yang dimaksud dengan ilmu ekonomi?",
+        options: ["Ilmu tentang kekayaan", "Ilmu tentang kelangkaan", "Ilmu tentang uang", "Ilmu tentang perdagangan"],
+        correctAnswer: "Ilmu tentang kelangkaan",
+        points: 10,
+        className: "Kelas 10",
+        subject: "EKONOMI",
+        bab: "BAB 1: Konsep Dasar Ilmu Ekonomi",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      },
+      {
+        id: "qb-2",
+        type: "pg",
+        question: "Berikut ini yang merupakan faktor produksi turunan adalah...",
+        options: ["Tanah dan Tenaga Kerja", "Modal dan Kewirausahaan", "Tenaga Kerja dan Modal", "Alam dan Modal"],
+        correctAnswer: "Modal dan Kewirausahaan",
+        points: 10,
+        className: "Kelas 10",
+        subject: "EKONOMI",
+        bab: "BAB 2: Masalah Pokok Ekonomi",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      },
+      {
+        id: "qb-3",
+        type: "benar_salah",
+        question: "Hukum permintaan menyatakan bahwa semakin tinggi harga barang, maka semakin banyak jumlah barang yang diminta.",
+        correctAnswer: "Salah",
+        points: 10,
+        className: "Kelas 10",
+        subject: "EKONOMI",
+        bab: "BAB 3: Mekanisme Pasar",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    ];
+    return loadStoredState<QuestionBankItem[]>("guru_bank_soal", defaultBank);
+  });
+
+  useEffect(() => {
+    safeStorage.setItem("guru_bank_soal", bankQuestions);
+  }, [bankQuestions]);
+
+  const [materials, setMaterials] = useState<LearningMaterial[]>(() => {
+    return loadStoredState<LearningMaterial[]>("guru_materials", PRESET_LEARNING_MATERIALS);
+  });
+
+  useEffect(() => {
+    safeStorage.setItem("guru_materials", materials);
+  }, [materials]);
+
+  const handleAddMaterial = (newMat: LearningMaterial) => {
+    setMaterials(prev => [newMat, ...prev]);
+  };
+
+  const handleEditMaterial = (updatedMat: LearningMaterial) => {
+    setMaterials(prev => prev.map(m => m.id === updatedMat.id ? updatedMat : m));
+  };
+
+  const handleDeleteMaterial = (id: string) => {
+    setMaterials(prev => prev.filter(m => m.id !== id));
+  };
+
+  const handleAddMaterialNote = (materialId: string, noteText: string, timestamp?: string) => {
+    const newNote: LearningMaterialNote = {
+      id: `n-${Date.now()}`,
+      timestamp: timestamp || "Catatan Mengajar",
+      content: noteText,
+      createdAt: new Date().toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })
+    };
+    setMaterials(prev => prev.map(m => {
+      if (m.id === materialId) {
+        return {
+          ...m,
+          notes: [...(m.notes || []), newNote]
+        };
+      }
+      return m;
+    }));
+  };
+
   // Master Restore Default Preset Function
   const handleRestorePresets = async () => {
     setClassList(CLASSES);
@@ -360,6 +627,7 @@ export default function App() {
     setSubmissions(PRESET_SUBMISSIONS);
     setGrades(PRESET_GRADES);
     setJournals(PRESET_JOURNAL);
+    setMaterials(PRESET_LEARNING_MATERIALS);
     setTeacherName("YUDI GINANJAR");
     setNip("199605242024211008");
     setSubject("EKONOMI");
@@ -373,6 +641,7 @@ export default function App() {
     safeStorage.setItem("guru_submissions", PRESET_SUBMISSIONS);
     safeStorage.setItem("guru_grades", PRESET_GRADES);
     safeStorage.setItem("guru_journals", PRESET_JOURNAL);
+    safeStorage.setItem("guru_materials", PRESET_LEARNING_MATERIALS);
     safeStorage.setItem("guru_name", "YUDI GINANJAR");
     safeStorage.setItem("guru_nip", "199605242024211008");
     safeStorage.setItem("guru_subject", "EKONOMI");
@@ -395,6 +664,7 @@ export default function App() {
       submissions: PRESET_SUBMISSIONS,
       grades: PRESET_GRADES,
       journals: PRESET_JOURNAL,
+      materials: PRESET_LEARNING_MATERIALS,
       attendanceList: [],
       homeroomNotes: [
         {
@@ -502,10 +772,7 @@ export default function App() {
     return safeStorage.getItem("guru_sync_key") || "guru-yudi-1996";
   });
 
-  const [isRealtimeSyncEnabled, setIsRealtimeSyncEnabled] = useState<boolean>(() => {
-    const saved = safeStorage.getItem("guru_realtime_sync_enabled");
-    return saved !== null ? saved === "true" : true;
-  });
+  const [isRealtimeSyncEnabled, setIsRealtimeSyncEnabled] = useState<boolean>(false);
 
   const [realtimeSyncStatus, setRealtimeSyncStatus] = useState<"idle" | "syncing" | "synced" | "error">("idle");
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(() => {
@@ -524,14 +791,25 @@ export default function App() {
   const [lastDailyBackupDate, setLastDailyBackupDate] = useState<string>(() => {
     return safeStorage.getItem("guru_last_daily_backup_date") || "";
   });
+  const [dailyBackupScheduleTime, setDailyBackupScheduleTime] = useState<string>(() => {
+    return safeStorage.getItem("guru_daily_backup_schedule_time") || "14:00";
+  });
   const [isDailyBackupSaving, setIsDailyBackupSaving] = useState(false);
   const [dailyBackupNotice, setDailyBackupNotice] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
-  // Sync ref flags to prevent circular echo updates
+  // Sync ref flags to prevent circular echo updates and race-condition overwrites
   const isIncomingRemoteUpdateRef = useRef(false);
   const isPushingRef = useRef(false);
+  const isInitialSyncCompletedRef = useRef(false);
   const lastRemoteUpdatedTimeRef = useRef<number>(0);
+  const localLastUpdatedRef = useRef<number>(
+    typeof window !== "undefined" && safeStorage.getItem("guru_local_last_updated")
+      ? Number(safeStorage.getItem("guru_local_last_updated")) || 0
+      : 0
+  );
   const syncTimeoutRef = useRef<any>(null);
+
+  const [isInitialSyncing, setIsInitialSyncing] = useState<boolean>(true);
 
   const addSyncLog = (message: string, type: "success" | "info" | "warning" | "error" = "info", device?: string) => {
     const newLog: SyncLogEntry = {
@@ -548,198 +826,59 @@ export default function App() {
     });
   };
 
-  // Push local data to Firestore Cloud
-  const pushDataToCloud = async (isManual = false) => {
-    if (!isRealtimeSyncEnabled && !isManual) return;
-    if (!syncKey || !syncKey.trim()) return;
+  // Helper to safely apply remote Firestore data into all React states
+  const applyRemoteDataToState = (remoteData: GuruSyncPayload) => {
+    isIncomingRemoteUpdateRef.current = true;
+    if (remoteData.teacherName !== undefined) setTeacherName(remoteData.teacherName);
+    if (remoteData.nip !== undefined) setNip(remoteData.nip);
+    if (remoteData.subject !== undefined) setSubject(remoteData.subject);
+    if (remoteData.institution !== undefined) setInstitution(remoteData.institution);
+    if (remoteData.currentMonth !== undefined) setCurrentMonth(remoteData.currentMonth);
+    if (remoteData.currentWeek !== undefined) setCurrentWeek(remoteData.currentWeek);
+    if (remoteData.headmasterName !== undefined) setHeadmasterName(remoteData.headmasterName);
+    if (remoteData.headmasterNip !== undefined) setHeadmasterNip(remoteData.headmasterNip);
+    if (remoteData.headmasterRank !== undefined) setHeadmasterRank(remoteData.headmasterRank);
+    if (remoteData.documentCity !== undefined) setDocumentCity(remoteData.documentCity);
+    if (remoteData.schoolNpsn !== undefined) setSchoolNpsn(remoteData.schoolNpsn);
+    if (remoteData.academicYear !== undefined) setAcademicYear(remoteData.academicYear);
+    if (remoteData.profilePhoto !== undefined) setProfilePhoto(remoteData.profilePhoto);
+    if (remoteData.homeroomClass !== undefined) setHomeroomClass(remoteData.homeroomClass);
+    if (Array.isArray(remoteData.classList)) setClassList(remoteData.classList);
+    if (Array.isArray(remoteData.students)) setStudents(sanitizeStudentsList(remoteData.students));
+    if (Array.isArray(remoteData.attendanceList)) setAttendanceList(remoteData.attendanceList);
+    if (Array.isArray(remoteData.grades)) setGrades(remoteData.grades);
+    if (Array.isArray(remoteData.schedule)) setSchedule(remoteData.schedule);
+    if (Array.isArray(remoteData.assignments)) setAssignments(remoteData.assignments);
+    if (Array.isArray(remoteData.submissions)) setSubmissions(remoteData.submissions);
+    if (Array.isArray(remoteData.journals)) setJournals(remoteData.journals);
+    if (Array.isArray(remoteData.homeroomNotes)) setHomeroomNotes(remoteData.homeroomNotes);
+    if (Array.isArray(remoteData.homeVisits)) setHomeVisits(remoteData.homeVisits);
+    if (Array.isArray(remoteData.materials)) setMaterials(remoteData.materials);
+    if (Array.isArray(remoteData.bankQuestions)) setBankQuestions(remoteData.bankQuestions);
 
-    isPushingRef.current = true;
-    setRealtimeSyncStatus("syncing");
+    const updateTime = remoteData.lastUpdated || Date.now();
+    lastRemoteUpdatedTimeRef.current = updateTime;
+    localLastUpdatedRef.current = updateTime;
+    safeStorage.setItem("guru_local_last_updated", String(updateTime));
 
-    const pushTime = Date.now();
-    lastRemoteUpdatedTimeRef.current = pushTime;
-
-    const payload: Partial<GuruSyncPayload> = {
-      teacherName,
-      nip,
-      subject,
-      institution,
-      currentMonth,
-      currentWeek,
-      profilePhoto,
-      homeroomClass,
-      classList,
-      students,
-      attendanceList,
-      grades,
-      schedule,
-      assignments,
-      submissions,
-      journals,
-      homeroomNotes,
-      homeVisits,
-      lastUpdated: pushTime
-    };
-
-    try {
-      const res = await saveGuruDataToFirestore(syncKey, payload);
-      if (res.success) {
-        lastRemoteUpdatedTimeRef.current = res.timestamp;
-        const timeStr = new Date(res.timestamp).toLocaleTimeString("id-ID");
-        const dev = getDeviceLabel();
-        setLastSyncTime(timeStr);
-        setLastUpdatedBy(dev);
-        safeStorage.setItem("guru_last_sync_time", timeStr);
-        safeStorage.setItem("guru_last_updated_by", dev);
-        setRealtimeSyncStatus("synced");
-        addSyncLog(`Data berhasil dikirim ke Cloud (${dev})`, "success", dev);
-      } else {
-        setRealtimeSyncStatus("error");
-        addSyncLog(`Gagal sync ke Cloud: ${res.error}`, "error");
-      }
-    } finally {
-      setTimeout(() => {
-        isPushingRef.current = false;
-      }, 800);
-    }
+    const timeStr = new Date(updateTime).toLocaleTimeString("id-ID");
+    const dev = remoteData.updatedBy || "Cloud";
+    setLastSyncTime(timeStr);
+    setLastUpdatedBy(dev);
+    safeStorage.setItem("guru_last_sync_time", timeStr);
+    safeStorage.setItem("guru_last_updated_by", dev);
+    setRealtimeSyncStatus("synced");
   };
 
-  // Manual pull from Firestore Cloud
-  const handleManualPull = async () => {
-    setRealtimeSyncStatus("syncing");
-    const res = await fetchGuruDataFromFirestore(syncKey);
-    if (res.success && res.data) {
-      const remoteData = res.data;
-      isIncomingRemoteUpdateRef.current = true;
-      if (remoteData.teacherName !== undefined) setTeacherName(remoteData.teacherName);
-      if (remoteData.nip !== undefined) setNip(remoteData.nip);
-      if (remoteData.subject !== undefined) setSubject(remoteData.subject);
-      if (remoteData.institution !== undefined) setInstitution(remoteData.institution);
-      if (remoteData.currentMonth !== undefined) setCurrentMonth(remoteData.currentMonth);
-      if (remoteData.currentWeek !== undefined) setCurrentWeek(remoteData.currentWeek);
-      if (remoteData.profilePhoto !== undefined) setProfilePhoto(remoteData.profilePhoto);
-      if (remoteData.homeroomClass !== undefined) setHomeroomClass(remoteData.homeroomClass);
-      if (Array.isArray(remoteData.classList)) setClassList(remoteData.classList);
-      if (Array.isArray(remoteData.students)) setStudents(remoteData.students);
-      if (Array.isArray(remoteData.attendanceList)) setAttendanceList(remoteData.attendanceList);
-      if (Array.isArray(remoteData.grades)) setGrades(remoteData.grades);
-      if (Array.isArray(remoteData.schedule)) setSchedule(remoteData.schedule);
-      if (Array.isArray(remoteData.assignments)) setAssignments(remoteData.assignments);
-      if (Array.isArray(remoteData.submissions)) setSubmissions(remoteData.submissions);
-      if (Array.isArray(remoteData.journals)) setJournals(remoteData.journals);
-      if (Array.isArray(remoteData.homeroomNotes)) setHomeroomNotes(remoteData.homeroomNotes);
-      if (Array.isArray(remoteData.homeVisits)) setHomeVisits(remoteData.homeVisits);
-
-      const timeStr = new Date(remoteData.lastUpdated || Date.now()).toLocaleTimeString("id-ID");
-      setLastSyncTime(timeStr);
-      setLastUpdatedBy(remoteData.updatedBy || "Cloud");
-      setRealtimeSyncStatus("synced");
-      addSyncLog(`Data berhasil ditarik manual dari Cloud`, "success");
-      setTimeout(() => {
-        isIncomingRemoteUpdateRef.current = false;
-      }, 800);
-    } else {
-      setRealtimeSyncStatus("error");
-      addSyncLog(`Gagal menarik data: ${res.error || "Data belum ada"}`, "error");
-    }
-  };
-
-  // Realtime Bi-Directional Firestore Listener
+  // Track local modifications to update local timestamp
   useEffect(() => {
-    safeStorage.setItem("guru_sync_key", syncKey);
-    safeStorage.setItem("guru_realtime_sync_enabled", isRealtimeSyncEnabled ? "true" : "false");
-
-    if (!isRealtimeSyncEnabled || !syncKey.trim()) return;
-
-    setRealtimeSyncStatus("syncing");
-    const unsubscribe = subscribeToGuruRealtimeData(
-      syncKey,
-      (remoteData: GuruSyncPayload) => {
-        if (!remoteData) return;
-
-        // Skip if this device is currently pushing local changes
-        if (isPushingRef.current) {
-          return;
-        }
-
-        // Skip if this update was triggered by this device's own recent push
-        if (remoteData.lastUpdated && remoteData.lastUpdated <= lastRemoteUpdatedTimeRef.current) {
-          setRealtimeSyncStatus("synced");
-          return;
-        }
-
-        lastRemoteUpdatedTimeRef.current = remoteData.lastUpdated || Date.now();
-        isIncomingRemoteUpdateRef.current = true;
-
-        // Apply remote changes from other device (HP / Laptop) with safety guards
-        if (remoteData.teacherName !== undefined) setTeacherName(remoteData.teacherName);
-        if (remoteData.nip !== undefined) setNip(remoteData.nip);
-        if (remoteData.subject !== undefined) setSubject(remoteData.subject);
-        if (remoteData.institution !== undefined) setInstitution(remoteData.institution);
-        if (remoteData.currentMonth !== undefined) setCurrentMonth(remoteData.currentMonth);
-        if (remoteData.currentWeek !== undefined) setCurrentWeek(remoteData.currentWeek);
-        if (remoteData.profilePhoto !== undefined) setProfilePhoto(remoteData.profilePhoto);
-        if (remoteData.homeroomClass !== undefined) setHomeroomClass(remoteData.homeroomClass);
-        if (Array.isArray(remoteData.classList)) setClassList(remoteData.classList);
-        if (Array.isArray(remoteData.students)) setStudents(remoteData.students);
-        if (Array.isArray(remoteData.attendanceList)) setAttendanceList(remoteData.attendanceList);
-        if (Array.isArray(remoteData.grades)) setGrades(remoteData.grades);
-        if (Array.isArray(remoteData.schedule)) setSchedule(remoteData.schedule);
-        if (Array.isArray(remoteData.assignments)) setAssignments(remoteData.assignments);
-        if (Array.isArray(remoteData.submissions)) setSubmissions(remoteData.submissions);
-        if (Array.isArray(remoteData.journals)) setJournals(remoteData.journals);
-        if (Array.isArray(remoteData.homeroomNotes)) setHomeroomNotes(remoteData.homeroomNotes);
-        if (Array.isArray(remoteData.homeVisits)) setHomeVisits(remoteData.homeVisits);
-
-        const timeStr = new Date(remoteData.lastUpdated || Date.now()).toLocaleTimeString("id-ID");
-        setLastSyncTime(timeStr);
-        setLastUpdatedBy(remoteData.updatedBy || "Cloud");
-        safeStorage.setItem("guru_last_sync_time", timeStr);
-        safeStorage.setItem("guru_last_updated_by", remoteData.updatedBy || "Cloud");
-        setRealtimeSyncStatus("synced");
-
-        const devLabel = remoteData.updatedBy || "Perangkat lain";
-        addSyncLog(`Pembaruan realtime diterima dari ${devLabel}`, "success", devLabel);
-
-        setCloudSyncNotice({
-          message: `Data sinkron otomatis dari ${devLabel} (${timeStr})`,
-          fromDevice: devLabel
-        });
-        setTimeout(() => setCloudSyncNotice(null), 5000);
-
-        setTimeout(() => {
-          isIncomingRemoteUpdateRef.current = false;
-        }, 800);
-      },
-      (err) => {
-        setRealtimeSyncStatus("error");
-        addSyncLog(`Koneksi realtime Firestore terputus`, "warning");
-      }
-    );
-
-    return () => {
-      if (unsubscribe) unsubscribe();
-    };
-  }, [syncKey, isRealtimeSyncEnabled]);
-
-  // Debounced Auto-Push on Local Edits (Edit di HP -> langsung update ke Laptop)
-  useEffect(() => {
+    if (!isInitialSyncCompletedRef.current) return;
     if (isIncomingRemoteUpdateRef.current) return;
     if (isPushingRef.current) return;
-    if (!isRealtimeSyncEnabled) return;
-    if (!syncKey.trim()) return;
 
-    if (syncTimeoutRef.current) {
-      clearTimeout(syncTimeoutRef.current);
-    }
-
-    syncTimeoutRef.current = setTimeout(() => {
-      pushDataToCloud(false);
-    }, 500);
-
-    return () => {
-      if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
-    };
+    const now = Date.now();
+    localLastUpdatedRef.current = now;
+    safeStorage.setItem("guru_local_last_updated", String(now));
   }, [
     teacherName,
     nip,
@@ -747,6 +886,12 @@ export default function App() {
     institution,
     currentMonth,
     currentWeek,
+    headmasterName,
+    headmasterNip,
+    headmasterRank,
+    documentCity,
+    schoolNpsn,
+    academicYear,
     profilePhoto,
     homeroomClass,
     classList,
@@ -759,15 +904,319 @@ export default function App() {
     journals,
     homeroomNotes,
     homeVisits,
-    isRealtimeSyncEnabled,
-    syncKey
+    materials,
+    bankQuestions
   ]);
 
+  // Push local data to Firestore Cloud with Timestamp-Authoritative Protection
+  const pushDataToCloud = async (isManual = false) => {
+    if (!isInitialSyncCompletedRef.current && !isManual) return;
+    if (!syncKey || !syncKey.trim()) return;
+
+    if (isFirestoreQuotaExceeded()) {
+      if (isManual) {
+        addSyncLog("Batas kuota Cloud Firestore (free tier) telah tercapai hari ini. Data Anda tetap aman di penyimpanan lokal. Gunakan 'Unduh Cadangan JSON' untuk berkas cadangan offline.", "warning");
+        setCloudSyncNotice({
+          message: "Batas kuota Cloud tercapai. Data Anda aman tersimpan di penyimpanan lokal.",
+          fromDevice: "Sistem"
+        });
+        setTimeout(() => setCloudSyncNotice(null), 5000);
+      }
+      return;
+    }
+
+    // Safety guard: check if Cloud has a NEWER dataset from any device before overwriting
+    try {
+      const checkRes = await fetchLatestGuruDataFromCloud(syncKey);
+      if (checkRes.success && checkRes.data?.lastUpdated) {
+        const cloudTime = checkRes.data.lastUpdated;
+        const localTime = localLastUpdatedRef.current || Number(safeStorage.getItem("guru_local_last_updated")) || 0;
+
+        if (cloudTime > localTime) {
+          const remoteDev = checkRes.data.updatedBy || "perangkat lain";
+          const timeStr = new Date(cloudTime).toLocaleTimeString("id-ID");
+          addSyncLog(`Ditemukan data yang lebih baru di Cloud (${timeStr} dari ${remoteDev}). Data mutakhir otomatis dimuat agar tidak tertimpa.`, "warning", remoteDev);
+          applyRemoteDataToState(checkRes.data);
+          setCloudSyncNotice({
+            message: `Data paling mutakhir (${timeStr} dari ${remoteDev}) dimuat agar tidak tertimpa`,
+            fromDevice: remoteDev
+          });
+          setTimeout(() => setCloudSyncNotice(null), 5000);
+          setTimeout(() => {
+            isIncomingRemoteUpdateRef.current = false;
+          }, 800);
+          return;
+        }
+      }
+    } catch {
+      // offline or network error, proceed with local push
+    }
+
+    isPushingRef.current = true;
+    setRealtimeSyncStatus("syncing");
+
+    const pushTime = Date.now();
+    localLastUpdatedRef.current = pushTime;
+    safeStorage.setItem("guru_local_last_updated", String(pushTime));
+
+    const payload: Partial<GuruSyncPayload> = {
+      teacherName,
+      nip,
+      subject,
+      institution,
+      currentMonth,
+      currentWeek,
+      headmasterName,
+      headmasterNip,
+      headmasterRank,
+      documentCity,
+      schoolNpsn,
+      academicYear,
+      profilePhoto,
+      homeroomClass,
+      classList,
+      students,
+      attendanceList,
+      grades,
+      schedule,
+      assignments,
+      submissions,
+      journals,
+      homeroomNotes,
+      homeVisits,
+      materials,
+      bankQuestions,
+      lastUpdated: pushTime
+    };
+
+    try {
+      const res = await saveGuruDataToFirestore(syncKey, payload);
+      if (res.success) {
+        lastRemoteUpdatedTimeRef.current = res.timestamp;
+        localLastUpdatedRef.current = res.timestamp;
+        safeStorage.setItem("guru_local_last_updated", String(res.timestamp));
+
+        const timeStr = new Date(res.timestamp).toLocaleTimeString("id-ID");
+        const dev = getDeviceLabel();
+        setLastSyncTime(timeStr);
+        setLastUpdatedBy(dev);
+        safeStorage.setItem("guru_last_sync_time", timeStr);
+        safeStorage.setItem("guru_last_updated_by", dev);
+        setRealtimeSyncStatus("synced");
+        addSyncLog(`Data berhasil diunggah ke Cloud Firestore (${dev}, ${timeStr}). Ditetapkan sebagai data paling mutakhir.`, "success", dev);
+      } else {
+        setRealtimeSyncStatus("error");
+        addSyncLog(`Gagal sync ke Cloud: ${res.error}`, "error");
+      }
+    } finally {
+      setTimeout(() => {
+        isPushingRef.current = false;
+      }, 800);
+    }
+  };
+
+  // Manual pull from Firestore Cloud (loads absolute newest data)
+  const handleManualPull = async () => {
+    if (isFirestoreQuotaExceeded()) {
+      setRealtimeSyncStatus("error");
+      addSyncLog("Batas kuota Cloud Firestore (free tier) telah tercapai hari ini. Menggunakan data lokal saat ini.", "warning");
+      return;
+    }
+
+    setRealtimeSyncStatus("syncing");
+    const res = await fetchLatestGuruDataFromCloud(syncKey);
+    if (res.success && res.data) {
+      applyRemoteDataToState(res.data);
+      const dev = res.data.updatedBy || "Cloud";
+      const timeStr = new Date(res.data.lastUpdated || Date.now()).toLocaleTimeString("id-ID");
+      addSyncLog(`Data paling mutakhir (${timeStr} dari ${dev}) berhasil ditarik dan dimuat.`, "success", dev);
+      setTimeout(() => {
+        isIncomingRemoteUpdateRef.current = false;
+      }, 800);
+    } else {
+      setRealtimeSyncStatus("error");
+      addSyncLog(`Gagal menarik data: ${res.error || "Data belum ada"}`, "error");
+    }
+  };
+
+  // Dedicated Auto-Sync toggle handler: when turning ON, pull first before syncing edits
+  const handleToggleRealtimeSync = async (enabled: boolean) => {
+    setIsRealtimeSyncEnabled(enabled);
+    safeStorage.setItem("guru_realtime_sync_enabled", enabled ? "true" : "false");
+    
+    if (enabled) {
+      addSyncLog("Auto-sync diaktifkan. Memuat data paling mutakhir dari Cloud...", "info");
+      await handleManualPull();
+    } else {
+      addSyncLog("Auto-sync dinonaktifkan.", "info");
+    }
+  };
+
+  // INITIAL STARTUP PRE-SYNC:
+  // Selalu muat data paling mutakhir dari seluruh sumber Cloud
+  useEffect(() => {
+    let isCancelled = false;
+
+    const performStartupSync = async () => {
+      if (!syncKey || !syncKey.trim()) {
+        isInitialSyncCompletedRef.current = true;
+        setIsInitialSyncing(false);
+        return;
+      }
+
+      if (isFirestoreQuotaExceeded()) {
+        isInitialSyncCompletedRef.current = true;
+        setIsInitialSyncing(false);
+        setRealtimeSyncStatus("synced");
+        addSyncLog("Batas kuota harian Cloud Firestore (free tier) telah tercapai. Menggunakan data lokal perangkat.", "info");
+        return;
+      }
+
+      setIsInitialSyncing(true);
+      setRealtimeSyncStatus("syncing");
+
+      try {
+        const res = await fetchLatestGuruDataFromCloud(syncKey);
+        if (isCancelled) return;
+
+        if (res.success && res.data) {
+          const cloudData = res.data;
+          const cloudTime = cloudData.lastUpdated || 0;
+          const localTime = localLastUpdatedRef.current || Number(safeStorage.getItem("guru_local_last_updated")) || 0;
+          const remoteDev = cloudData.updatedBy || "perangkat terakhir";
+          const timeStr = new Date(cloudTime).toLocaleTimeString("id-ID");
+
+          // Always load Cloud data if Cloud data is newer, equal, or local state is default/unmodified
+          if (cloudTime >= localTime || localTime === 0) {
+            applyRemoteDataToState(cloudData);
+            addSyncLog(`Data paling mutakhir dimuat dari Cloud (${remoteDev}, ${timeStr})`, "success", remoteDev);
+
+            setCloudSyncNotice({
+              message: `Data paling mutakhir (${timeStr} dari ${remoteDev}) otomatis dimuat`,
+              fromDevice: remoteDev
+            });
+            setTimeout(() => setCloudSyncNotice(null), 5000);
+          } else {
+            // Local data on this device is newer
+            addSyncLog(`Data lokal di ${getDeviceLabel()} (${new Date(localTime).toLocaleTimeString("id-ID")}) lebih baru dari Cloud. Tekan "Unggah ke Cloud" untuk memperbarui.`, "info");
+            setRealtimeSyncStatus("synced");
+          }
+        } else {
+          setRealtimeSyncStatus("synced");
+        }
+      } catch (err: any) {
+        console.warn("Sinkronisasi awal Cloud:", err);
+        setRealtimeSyncStatus("error");
+        addSyncLog(`Gagal sinkron awal: ${err?.message || err}`, "warning");
+      } finally {
+        setTimeout(() => {
+          isIncomingRemoteUpdateRef.current = false;
+          isInitialSyncCompletedRef.current = true;
+          if (!isCancelled) {
+            setIsInitialSyncing(false);
+          }
+        }, 500);
+      }
+    };
+
+    performStartupSync();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [syncKey]);
+
+  // Save sync key to local storage
+  useEffect(() => {
+    safeStorage.setItem("guru_sync_key", syncKey);
+  }, [syncKey]);
+
+  const [isDriveBackupSaving, setIsDriveBackupSaving] = useState(false);
+  const [driveBackupNotice, setDriveBackupNotice] = useState<{type: "success" | "error", message: string} | null>(null);
+  
+  const [driveToken, setDriveToken] = useState<string>("");
+  const [driveBackupHistory, setDriveBackupHistory] = useState<DriveBackupItem[]>([]);
+  const [isFetchingDriveHistory, setIsFetchingDriveHistory] = useState(false);
+
+  const loginForDriveList = useGoogleLogin({
+    scope: 'https://www.googleapis.com/auth/drive.file',
+    prompt: '', // Skip prompt if already authenticated
+    onSuccess: async (tokenResponse) => {
+      setDriveToken(tokenResponse.access_token);
+      try {
+        setIsFetchingDriveHistory(true);
+        const files = await listDriveBackups(tokenResponse.access_token, syncKey);
+        setDriveBackupHistory(files);
+        setDriveBackupNotice({ type: "success", message: "Berhasil memuat daftar riwayat dari Google Drive" });
+      } catch (err: any) {
+        setDriveBackupNotice({ type: "error", message: `Gagal memuat dari Drive: ${err.message}` });
+      } finally {
+        setIsFetchingDriveHistory(false);
+      }
+    },
+    onError: (error) => {
+      console.error('Google Login Error:', error);
+      setDriveBackupNotice({ type: "error", message: "Gagal mengautentikasi dengan Google Drive." });
+      setIsFetchingDriveHistory(false);
+    }
+  });
+
+  const loginForDriveBackup = useGoogleLogin({
+    scope: 'https://www.googleapis.com/auth/drive.file',
+    prompt: '', // Skip prompt if already authenticated
+    onSuccess: async (tokenResponse) => {
+      setDriveToken(tokenResponse.access_token);
+      try {
+        setIsDriveBackupSaving(true);
+        setDriveBackupNotice({ type: "success", message: "Menghubungkan ke Google Drive..." });
+
+        const payload: Partial<GuruSyncPayload> = {
+          teacherName, nip, subject, institution, currentMonth, currentWeek,
+          headmasterName, headmasterNip, headmasterRank, documentCity, schoolNpsn,
+          academicYear, profilePhoto, homeroomClass, classList, students,
+          attendanceList, grades, schedule, assignments, submissions, journals,
+          homeroomNotes, homeVisits, materials
+        };
+
+        // File name using current date
+        const dateStr = getLocalDateString();
+        const filename = `Backup_SuperAppGuru_${syncKey}_${dateStr}.json`;
+
+        await uploadBackupToDrive(tokenResponse.access_token, payload, filename);
+        
+        // Hapus cadangan yang lebih lama dari 5 hari secara otomatis
+        await pruneOldDriveBackups(tokenResponse.access_token, syncKey);
+
+        setDriveBackupNotice({ type: "success", message: `Backup berhasil disimpan ke Google Drive dengan nama: ${filename}` });
+      } catch (err: any) {
+        setDriveBackupNotice({ type: "error", message: `Gagal mencadangkan ke Drive: ${err.message}` });
+      } finally {
+        setIsDriveBackupSaving(false);
+      }
+    },
+    onError: (error) => {
+      console.error('Google Login Error:', error);
+      setDriveBackupNotice({ type: "error", message: "Gagal mengautentikasi dengan Google Drive." });
+      setIsDriveBackupSaving(false);
+    }
+  });
+
   // Daily Backup Handlers (Akhir Hari Backup)
-  const triggerDailyBackup = useCallback(async (isManual = false) => {
+  const triggerDailyBackup = useCallback(async (isManual = false, customTimeLabel?: string) => {
     if (!syncKey || !syncKey.trim()) {
       if (isManual) {
         setDailyBackupNotice({ type: "error", message: "Kode sinkronisasi belum diatur." });
+      }
+      return;
+    }
+
+    if (isFirestoreQuotaExceeded()) {
+      setIsDailyBackupSaving(false);
+      if (isManual) {
+        setDailyBackupNotice({
+          type: "error",
+          message: "Batas kuota harian Cloud Firestore (free tier) telah tercapai. Data Anda tetap tersimpan aman di lokal HP/Laptop. Silakan unduh cadangan via tombol 'Unduh Cadangan (File JSON)'."
+        });
       }
       return;
     }
@@ -782,6 +1231,12 @@ export default function App() {
       institution,
       currentMonth,
       currentWeek,
+      headmasterName,
+      headmasterNip,
+      headmasterRank,
+      documentCity,
+      schoolNpsn,
+      academicYear,
       profilePhoto,
       homeroomClass,
       classList,
@@ -793,20 +1248,24 @@ export default function App() {
       submissions,
       journals,
       homeroomNotes,
-      homeVisits
+      homeVisits,
+      materials,
+      bankQuestions
     };
 
-    const res = await saveDailyBackupToFirestore(syncKey, payload);
+    const res = await saveDailyBackupToFirestore(syncKey, payload, undefined, customTimeLabel);
     setIsDailyBackupSaving(false);
 
     if (res.success) {
       setLastDailyBackupDate(res.dateStr);
       safeStorage.setItem("guru_last_daily_backup_date", res.dateStr);
+      const timeDisplay = res.backupTime ? ` - Pukul ${res.backupTime}` : "";
+      const sizeDisplay = res.totalSizeKB ? ` (${res.totalSizeKB >= 1024 ? `${(res.totalSizeKB / 1024).toFixed(2)} MB` : `${res.totalSizeKB} KB`})` : "";
       setDailyBackupNotice({
         type: "success",
-        message: `Cadangan data harian (${res.dateStr}) berhasil disimpan ke Cloud Database!`
+        message: `Cadangan data harian (${res.dateStr}${timeDisplay}${sizeDisplay}) berhasil disimpan ke Cloud Database!`
       });
-      addSyncLog(`Cadangan harian ${res.dateStr} tersimpan di Database Cloud`, "success");
+      addSyncLog(`Cadangan harian ${res.dateStr} (${res.backupTime || "14:00 WIB"}${sizeDisplay}) tersimpan di Database Cloud`, "success");
 
       const hist = await fetchDailyBackupHistoryFromFirestore(syncKey);
       if (hist.success) {
@@ -819,68 +1278,330 @@ export default function App() {
       });
       addSyncLog(`Gagal cadangkan harian: ${res.error}`, "error");
     }
-  }, [syncKey, teacherName, nip, subject, institution, currentMonth, currentWeek, profilePhoto, homeroomClass, classList, students, attendanceList, grades, schedule, assignments, submissions, journals, homeroomNotes, homeVisits]);
+  }, [syncKey, teacherName, nip, subject, institution, currentMonth, currentWeek, headmasterName, headmasterNip, headmasterRank, documentCity, schoolNpsn, academicYear, profilePhoto, homeroomClass, classList, students, attendanceList, grades, schedule, assignments, submissions, journals, homeroomNotes, homeVisits, materials, bankQuestions]);
 
-  // Auto daily backup runner (runs once per day if syncKey is set)
+  const triggerDailyBackupRef = useRef(triggerDailyBackup);
+  triggerDailyBackupRef.current = triggerDailyBackup;
+
+  // Auto daily backup runner (scheduled check e.g., 14:00 / Jam 2 Siang)
   useEffect(() => {
     if (!syncKey || !syncKey.trim()) return;
 
-    const todayStr = new Date().toISOString().split("T")[0];
+    if (!isFirestoreQuotaExceeded()) {
+      fetchDailyBackupHistoryFromFirestore(syncKey).then(hist => {
+        if (hist.success) {
+          setDailyBackupHistory(hist.backups);
+        }
+      });
+    }
 
-    fetchDailyBackupHistoryFromFirestore(syncKey).then(hist => {
-      if (hist.success) {
-        setDailyBackupHistory(hist.backups);
+    const checkAndRunDailyBackup = () => {
+      if (isFirestoreQuotaExceeded()) return;
+
+      const now = new Date();
+      const todayStr = now.toISOString().split("T")[0];
+      const currentHours = now.getHours();
+      const currentMinutes = now.getMinutes();
+
+      const [schedHours, schedMinutes] = (dailyBackupScheduleTime || "14:00").split(":").map(Number);
+      const isPastOrAtScheduleTime = (currentHours > schedHours) || (currentHours === schedHours && currentMinutes >= (schedMinutes || 0));
+
+      const lastSaved = safeStorage.getItem("guru_last_daily_backup_date");
+      const lastAttempt = safeStorage.getItem("guru_daily_backup_last_attempt_date");
+      const lastAttemptTime = Number(safeStorage.getItem("guru_daily_backup_last_attempt_time")) || 0;
+
+      // Auto trigger if not backed up today and time has passed schedule (e.g. 14:00),
+      // with cooldown check (max 1 attempt per 60 minutes) to avoid repeated write loops on failure
+      if (lastSaved !== todayStr && lastAttempt !== todayStr && isPastOrAtScheduleTime && (Date.now() - lastAttemptTime > 60 * 60 * 1000)) {
+        safeStorage.setItem("guru_daily_backup_last_attempt_date", todayStr);
+        safeStorage.setItem("guru_daily_backup_last_attempt_time", String(Date.now()));
+        triggerDailyBackupRef.current(false, `${dailyBackupScheduleTime} WIB (Otomatis)`);
+      }
+    };
+
+    // Check immediately on mount/load
+    checkAndRunDailyBackup();
+
+    // Check periodically every 5 minutes (300,000 ms) instead of 30 seconds
+    const interval = setInterval(checkAndRunDailyBackup, 300000);
+    return () => clearInterval(interval);
+  }, [syncKey, dailyBackupScheduleTime]);
+
+  // Core Restore Application Logic (Handles both Cloud Snapshots and File Imports)
+  const applyRestoredData = useCallback((data: any, sourceTitle: string) => {
+    if (!data || typeof data !== "object") {
+      throw new Error("Data cadangan kosong atau tidak memiliki format yang valid.");
+    }
+
+    isIncomingRemoteUpdateRef.current = true;
+
+    // Extract profile fields (support nested teacherProfile or flat top-level)
+    const profile = data.teacherProfile || data;
+    const tName = profile.teacherName || data.teacherName;
+    const tNip = profile.nip !== undefined ? profile.nip : data.nip;
+    const tSubject = profile.subject || data.subject;
+    const tInstitution = profile.institution || data.institution;
+    const tMonth = profile.currentMonth || data.currentMonth;
+    const tWeek = profile.currentWeek || data.currentWeek;
+    const tHeadmasterName = profile.headmasterName || data.headmasterName;
+    const tHeadmasterNip = profile.headmasterNip !== undefined ? profile.headmasterNip : data.headmasterNip;
+    const tHeadmasterRank = profile.headmasterRank || data.headmasterRank;
+    const tDocumentCity = profile.documentCity || data.documentCity;
+    const tSchoolNpsn = profile.schoolNpsn || data.schoolNpsn;
+    const tAcademicYear = profile.academicYear || data.academicYear;
+    const tPhoto = profile.profilePhoto !== undefined ? profile.profilePhoto : data.profilePhoto;
+    const tHomeroom = profile.homeroomClass || data.homeroomClass;
+
+    if (tName) {
+      setTeacherName(tName);
+      safeStorage.setItem("guru_name", tName);
+    }
+    if (tNip !== undefined) {
+      setNip(tNip);
+      safeStorage.setItem("guru_nip", tNip);
+    }
+    if (tSubject) {
+      setSubject(tSubject);
+      safeStorage.setItem("guru_subject", tSubject);
+    }
+    if (tInstitution) {
+      setInstitution(tInstitution);
+      safeStorage.setItem("guru_institution", tInstitution);
+    }
+    if (tMonth) {
+      setCurrentMonth(tMonth);
+      safeStorage.setItem("guru_month", tMonth);
+    }
+    if (tWeek) {
+      setCurrentWeek(tWeek);
+      safeStorage.setItem("guru_week", tWeek);
+    }
+    if (tHeadmasterName) {
+      setHeadmasterName(tHeadmasterName);
+      safeStorage.setItem("guru_headmaster_name", tHeadmasterName);
+    }
+    if (tHeadmasterNip !== undefined) {
+      setHeadmasterNip(tHeadmasterNip);
+      safeStorage.setItem("guru_headmaster_nip", tHeadmasterNip);
+    }
+    if (tHeadmasterRank) {
+      setHeadmasterRank(tHeadmasterRank);
+      safeStorage.setItem("guru_headmaster_rank", tHeadmasterRank);
+    }
+    if (tDocumentCity) {
+      setDocumentCity(tDocumentCity);
+      safeStorage.setItem("guru_document_city", tDocumentCity);
+    }
+    if (tSchoolNpsn) {
+      setSchoolNpsn(tSchoolNpsn);
+      safeStorage.setItem("guru_school_npsn", tSchoolNpsn);
+    }
+    if (tAcademicYear) {
+      setAcademicYear(tAcademicYear);
+      safeStorage.setItem("guru_academic_year", tAcademicYear);
+    }
+    if (tPhoto !== undefined) {
+      setProfilePhoto(tPhoto);
+      safeStorage.setItem("guru_profile_photo", tPhoto);
+    }
+    if (tHomeroom) {
+      setHomeroomClass(tHomeroom);
+      safeStorage.setItem("guru_homeroom_class", tHomeroom);
+    }
+
+    // Extract arrays (support both camelCase and alternate standard keys)
+    const rawClasses = Array.isArray(data.classList) ? data.classList : (Array.isArray(data.classes) ? data.classes : null);
+    if (rawClasses && rawClasses.length > 0) {
+      setClassList(rawClasses);
+      safeStorage.setItem("guru_classes", rawClasses);
+    }
+
+    const rawStudents = Array.isArray(data.students) ? data.students : null;
+    if (rawStudents) {
+      const unique = sanitizeStudentsList(rawStudents);
+      setStudents(unique);
+      safeStorage.setItem("guru_students", unique);
+    }
+
+    const rawAttendance = Array.isArray(data.attendanceList) ? data.attendanceList : (Array.isArray(data.attendance) ? data.attendance : null);
+    if (rawAttendance) {
+      setAttendanceList(rawAttendance);
+      safeStorage.setItem("guru_attendance", rawAttendance);
+    }
+
+    const rawGrades = Array.isArray(data.grades) ? data.grades : null;
+    if (rawGrades) {
+      setGrades(rawGrades);
+      safeStorage.setItem("guru_grades", rawGrades);
+    }
+
+    const rawSchedule = Array.isArray(data.schedule) ? data.schedule : null;
+    if (rawSchedule) {
+      setSchedule(rawSchedule);
+      safeStorage.setItem("guru_schedule", rawSchedule);
+    }
+
+    const rawAssignments = Array.isArray(data.assignments) ? data.assignments : null;
+    if (rawAssignments) {
+      setAssignments(rawAssignments);
+      safeStorage.setItem("guru_assignments", rawAssignments);
+    }
+
+    const rawSubmissions = Array.isArray(data.submissions) ? data.submissions : null;
+    if (rawSubmissions) {
+      setSubmissions(rawSubmissions);
+      safeStorage.setItem("guru_submissions", rawSubmissions);
+    }
+
+    const rawJournals = Array.isArray(data.journals) ? data.journals : null;
+    if (rawJournals) {
+      setJournals(rawJournals);
+      safeStorage.setItem("guru_journals", rawJournals);
+    }
+
+    const rawNotes = Array.isArray(data.homeroomNotes) ? data.homeroomNotes : (Array.isArray(data.notes) ? data.notes : null);
+    if (rawNotes) {
+      setHomeroomNotes(rawNotes);
+      safeStorage.setItem("guru_homeroom_notes", rawNotes);
+    }
+
+    const rawVisits = Array.isArray(data.homeVisits) ? data.homeVisits : (Array.isArray(data.visits) ? data.visits : null);
+    if (rawVisits) {
+      setHomeVisits(rawVisits);
+      safeStorage.setItem("guru_home_visits", rawVisits);
+    }
+
+    const summaryParts = [
+      rawStudents ? `${rawStudents.length} Siswa` : null,
+      rawAttendance ? `${rawAttendance.length} Absensi` : null,
+      (rawNotes || rawVisits) ? `${(rawNotes?.length || 0) + (rawVisits?.length || 0)} Kegiatan Wali Kelas` : null,
+      rawGrades ? `${rawGrades.length} Nilai` : null,
+      rawJournals ? `${rawJournals.length} Jurnal` : null,
+      rawClasses ? `${rawClasses.length} Kelas` : null,
+      tName ? `Profil ${tName}` : null
+    ].filter(Boolean);
+
+    const detailMsg = `Data berhasil dipulihkan dari ${sourceTitle}${summaryParts.length > 0 ? ` (${summaryParts.join(", ")})` : ""}!`;
+    setRestoreSuccessMsg(detailMsg);
+    setRestoreErrorMsg(null);
+    addSyncLog(detailMsg, "success");
+
+    // Automatically trigger cloud push after 600ms so connected devices receive restored dataset
+    setTimeout(() => {
+      pushDataToCloud(true);
+    }, 600);
+  }, [syncKey, pushDataToCloud]);
+
+  // Open confirmation modal for Cloud Restore
+  const handleOpenCloudRestoreConfirm = (backupItem: DailyBackupItem) => {
+    setRestoreErrorMsg(null);
+    setRestoreSuccessMsg(null);
+    setConfirmRestoreModal({
+      isOpen: true,
+      type: "cloud",
+      backupItem,
+      details: {
+        studentCount: backupItem.studentCount || 0,
+        gradeCount: backupItem.gradeCount || 0,
+        journalCount: backupItem.journalCount || 0,
+        classCount: backupItem.classCount || 0,
+        attendanceCount: backupItem.attendanceCount || 0,
+        homeroomCount: backupItem.homeroomCount || 0,
+        homeVisitsCount: backupItem.homeVisitsCount || 0,
+        scheduleCount: backupItem.scheduleCount || 0,
+        assignmentCount: backupItem.assignmentCount || 0,
+        teacherName: backupItem.teacherName || teacherName || "Guru"
       }
     });
+  };
 
-    const lastSaved = safeStorage.getItem("guru_last_daily_backup_date");
-    if (lastSaved !== todayStr) {
-      const timer = setTimeout(() => {
-        triggerDailyBackup(false);
-      }, 2500);
-      return () => clearTimeout(timer);
-    }
-  }, [syncKey, triggerDailyBackup]);
+  // Process & preview imported JSON file
+  const handleProcessImportFile = (file: File) => {
+    if (!file) return;
+    setRestoreErrorMsg(null);
+    setRestoreSuccessMsg(null);
 
-  // Restore from Cloud Snapshot
-  const handleRestoreDailyBackupFromCloud = async (backupItem: DailyBackupItem) => {
-    if (!window.confirm(`Apakah Anda yakin ingin memulihkan cadangan data tanggal ${backupItem.formattedDate}? Data aplikasi saat ini akan diperbarui.`)) {
-      return;
-    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const content = event.target?.result as string;
+        const json = JSON.parse(content);
+        if (!json || typeof json !== "object") {
+          throw new Error("Format file .json tidak valid.");
+        }
 
-    setRestoreError(null);
-    setRestoreSuccess(false);
+        const profile = json.teacherProfile || json;
+        const sCount = Array.isArray(json.students) ? json.students.length : 0;
+        const gCount = Array.isArray(json.grades) ? json.grades.length : 0;
+        const jCount = Array.isArray(json.journals) ? json.journals.length : 0;
+        const cCount = Array.isArray(json.classList || json.classes) ? (json.classList || json.classes).length : 0;
+        const aCount = Array.isArray(json.attendanceList || json.attendance) ? (json.attendanceList || json.attendance).length : 0;
+        const hCount = Array.isArray(json.homeroomNotes || json.notes) ? (json.homeroomNotes || json.notes).length : 0;
+        const hvCount = Array.isArray(json.homeVisits || json.visits) ? (json.homeVisits || json.visits).length : 0;
+        const schCount = Array.isArray(json.schedule) ? json.schedule.length : 0;
+        const assignCount = Array.isArray(json.assignments) ? json.assignments.length : 0;
 
-    const res = await restoreDailyBackupFromFirestore(syncKey, backupItem.dateStr);
-    if (res.success && res.data) {
-      const data = res.data;
-      if (data.teacherName !== undefined) setTeacherName(data.teacherName);
-      if (data.nip !== undefined) setNip(data.nip);
-      if (data.subject !== undefined) setSubject(data.subject);
-      if (data.institution !== undefined) setInstitution(data.institution);
-      if (data.currentMonth !== undefined) setCurrentMonth(data.currentMonth);
-      if (data.currentWeek !== undefined) setCurrentWeek(data.currentWeek);
-      if (data.profilePhoto !== undefined) setProfilePhoto(data.profilePhoto);
-      if (data.homeroomClass !== undefined) setHomeroomClass(data.homeroomClass);
-      if (Array.isArray(data.classList)) setClassList(data.classList);
-      if (Array.isArray(data.students)) setStudents(data.students);
-      if (Array.isArray(data.attendanceList)) setAttendanceList(data.attendanceList);
-      if (Array.isArray(data.grades)) setGrades(data.grades);
-      if (Array.isArray(data.schedule)) setSchedule(data.schedule);
-      if (Array.isArray(data.assignments)) setAssignments(data.assignments);
-      if (Array.isArray(data.submissions)) setSubmissions(data.submissions);
-      if (Array.isArray(data.journals)) setJournals(data.journals);
-      if (Array.isArray(data.homeroomNotes)) setHomeroomNotes(data.homeroomNotes);
-      if (Array.isArray(data.homeVisits)) setHomeVisits(data.homeVisits);
+        setConfirmRestoreModal({
+          isOpen: true,
+          type: "file",
+          fileData: json,
+          fileName: file.name,
+          details: {
+            studentCount: sCount,
+            gradeCount: gCount,
+            journalCount: jCount,
+            classCount: cCount,
+            attendanceCount: aCount,
+            homeroomCount: hCount,
+            homeVisitsCount: hvCount,
+            scheduleCount: schCount,
+            assignmentCount: assignCount,
+            teacherName: profile.teacherName || json.teacherName || "Guru"
+          }
+        });
+      } catch (err: any) {
+        console.error("File parse error:", err);
+        setRestoreErrorMsg(err?.message || "Berkas tidak dapat dibaca. Pastikan memilih berkas .json cadangan EduAsisten yang valid.");
+      }
+    };
+    reader.readAsText(file);
+  };
 
-      setRestoreSuccess(true);
-      addSyncLog(`Data dipulihkan dari cadangan Cloud (${backupItem.formattedDate})`, "success");
+  // Execute restore after user confirms in the modal
+  const handleExecuteRestore = async () => {
+    if (!confirmRestoreModal) return;
+    setIsRestoringData(true);
+    setRestoreErrorMsg(null);
 
-      setTimeout(() => {
-        pushDataToCloud(true);
-      }, 500);
-    } else {
-      setRestoreError(res.error || "Gagal memulihkan cadangan data");
+    try {
+      if (confirmRestoreModal.type === "cloud" && confirmRestoreModal.backupItem) {
+        const item = confirmRestoreModal.backupItem;
+        const res = await restoreDailyBackupFromFirestore(syncKey, item.dateStr || item.id);
+        if (res.success && res.data) {
+          applyRestoredData(res.data, `Cloud Database (${item.formattedDate})`);
+          setConfirmRestoreModal(null);
+        } else {
+          setRestoreErrorMsg(res.error || `Gagal mengambil cadangan data ${item.formattedDate} dari Firestore.`);
+        }
+      } else if (confirmRestoreModal.type === "drive" && confirmRestoreModal.driveItem) {
+        if (!driveToken) {
+          setRestoreErrorMsg("Sesi Google Drive telah habis, silakan muat ulang daftar riwayat.");
+          setIsRestoringData(false);
+          return;
+        }
+        const item = confirmRestoreModal.driveItem;
+        const data = await downloadDriveBackup(driveToken, item.id);
+        applyRestoredData(data, `Google Drive (${item.name})`);
+        setConfirmRestoreModal(null);
+      } else if (confirmRestoreModal.type === "file" && confirmRestoreModal.fileData) {
+        applyRestoredData(confirmRestoreModal.fileData, `Berkas File (${confirmRestoreModal.fileName || "JSON"})`);
+        setConfirmRestoreModal(null);
+      }
+    } catch (err: any) {
+      console.error("Restore error:", err);
+      setRestoreErrorMsg(err?.message || "Terjadi kesalahan saat memulihkan data.");
+    } finally {
+      setIsRestoringData(false);
     }
   };
 
@@ -990,7 +1711,7 @@ export default function App() {
     }
     const finalClass = targetClass || selectedStudentClassFilter || classList[0] || "X-MIPA-1";
     const created: Student = {
-      id: `s-${Date.now()}-${Math.floor(Math.random()*1000)}`,
+      id: `s-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       name: trimmedName,
       nis: nis.trim() || `${Math.floor(10000000 + Math.random() * 90000000)}`,
       className: finalClass
@@ -1132,7 +1853,7 @@ export default function App() {
     });
 
     const newStudentObjects: Student[] = importPreview.students.map((s, idx) => ({
-      id: `s-imp-${Date.now()}-${idx}-${Math.floor(Math.random()*1000)}`,
+      id: `s-imp-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 9)}`,
       name: s.name,
       nis: s.nis,
       className: s.className
@@ -1156,8 +1877,9 @@ export default function App() {
   const handleSaveAttendance = (newAttendance: Attendance[]) => {
     setAttendanceList(prev => {
       // Filter out existing records matching student ID + Date in payload to avoid duplicates
+      const keysToReplace = new Set(newAttendance.map(n => `${n.studentId}_${n.date}`));
       const idsToReplace = new Set(newAttendance.map(n => n.id));
-      const filtered = prev.filter(p => !idsToReplace.has(p.id));
+      const filtered = prev.filter(p => !idsToReplace.has(p.id) && !keysToReplace.has(`${p.studentId}_${p.date}`));
       return [...filtered, ...newAttendance];
     });
   };
@@ -1216,19 +1938,36 @@ export default function App() {
 
   // 4. Penilaian: Apply a final grade (either AI suggested or teacher edited) to a student's record
   const handleApplyGrade = (assignmentId: string, studentId: string, score: number, aiAnalysis?: any) => {
-    // A. Update Submission Record
+    // A. Update Submission Record (create or update)
     setSubmissions(prev => {
-      return prev.map(sub => {
-        if (sub.assignmentId === assignmentId && sub.studentId === studentId) {
-          return {
-            ...sub,
-            score,
-            status: "Selesai",
-            aiAnalysis
-          };
-        }
-        return sub;
-      });
+      const exists = prev.some(sub => sub.assignmentId === assignmentId && sub.studentId === studentId);
+      if (exists) {
+        return prev.map(sub => {
+          if (sub.assignmentId === assignmentId && sub.studentId === studentId) {
+            return {
+              ...sub,
+              score,
+              status: "Selesai",
+              aiAnalysis: aiAnalysis || sub.aiAnalysis
+            };
+          }
+          return sub;
+        });
+      } else {
+        const studentInfo = students.find(s => s.id === studentId);
+        const newSub: Submission = {
+          id: `sub-${studentId}-${assignmentId || Date.now()}`,
+          assignmentId: assignmentId || "general",
+          studentId,
+          studentName: studentInfo?.name || "Siswa",
+          submittedDate: new Date().toISOString().split("T")[0],
+          studentAnswer: "",
+          score,
+          status: "Selesai",
+          aiAnalysis
+        };
+        return [...prev, newSub];
+      }
     });
 
     // B. Update Core Grade Book sheet state
@@ -1249,13 +1988,47 @@ export default function App() {
         const newRow: StudentGrade = {
           studentId,
           studentName: studentInfo?.name || "Siswa Baru",
-          className: studentInfo?.className || CLASSES[0],
+          className: studentInfo?.className || (classList[0] || "X-MIPA-1"),
           assignmentScores: { [assignmentId]: score },
           examScore: 0
         };
         return [...prev, newRow];
       }
     });
+  };
+
+  // Quick Create Assignment from Penilaian AI
+  const handleQuickCreateAssignment = (
+    title: string,
+    targetClass: string,
+    category: 'Tugas' | 'Ulangan Harian' | 'Proyek' | 'Kuis' | 'Lainnya' = 'Ulangan Harian',
+    maxScore: number = 100
+  ) => {
+    const newId = `assign-${Date.now()}`;
+    const newAssign: Assignment = {
+      id: newId,
+      title,
+      className: targetClass,
+      category,
+      dueDate: new Date().toISOString().split("T")[0],
+      maxScore
+    };
+    
+    const targetStudents = students.filter(s => s.className === targetClass);
+    const seededSubs: Submission[] = targetStudents.map(student => ({
+      id: `sub-${student.id}-${newId}`,
+      assignmentId: newId,
+      studentId: student.id,
+      studentName: student.name,
+      submittedDate: "",
+      studentAnswer: "",
+      score: null,
+      status: "Belum Dikumpulkan"
+    }));
+
+    setAssignments(prev => [...prev, newAssign]);
+    setSubmissions(prev => [...prev, ...seededSubs]);
+    return newId;
   };
 
   // 4b. Bulk / Batch Apply Grades to Gradebook (Daftar Nilai)
@@ -1408,6 +2181,60 @@ export default function App() {
     });
   };
 
+  // 7. Update Submission Details (Student Answer & AI breakdown)
+  const handleUpdateSubmission = (
+    submissionId: string,
+    updatedAnswer: string,
+    newScore?: number,
+    updatedItems?: any[],
+    studentId?: string,
+    assignmentId?: string
+  ) => {
+    let targetAssignmentId = assignmentId;
+    let targetStudentId = studentId;
+
+    setSubmissions(prev => {
+      const idx = prev.findIndex(s => s.id === submissionId);
+      if (idx > -1) {
+        targetAssignmentId = prev[idx].assignmentId;
+        targetStudentId = prev[idx].studentId;
+        const updated = [...prev];
+        const prevAi = updated[idx].aiAnalysis || {};
+        const newAiAnalysis = updatedItems 
+          ? { ...prevAi, items: updatedItems }
+          : (Object.keys(prevAi).length > 0 ? prevAi : undefined);
+
+        updated[idx] = {
+          ...updated[idx],
+          studentAnswer: updatedAnswer,
+          score: newScore !== undefined ? newScore : updated[idx].score,
+          status: "Selesai",
+          aiAnalysis: newAiAnalysis
+        };
+        return updated;
+      } else if (studentId && assignmentId) {
+        const studentObj = students.find(s => s.id === studentId);
+        const newSub: Submission = {
+          id: submissionId || `sub-${studentId}-${assignmentId}`,
+          assignmentId,
+          studentId,
+          studentName: studentObj?.name || "Siswa",
+          submittedDate: new Date().toISOString().split("T")[0],
+          studentAnswer: updatedAnswer,
+          score: newScore !== undefined ? newScore : null,
+          status: "Selesai",
+          aiAnalysis: updatedItems ? { items: updatedItems } : undefined
+        };
+        return [...prev, newSub];
+      }
+      return prev;
+    });
+
+    if (targetStudentId && targetAssignmentId && newScore !== undefined) {
+      handleUpdateGradeCell(targetStudentId, targetAssignmentId, newScore);
+    }
+  };
+
   // Reset Data Handler
   const handleResetData = () => {
     if (captchaValue !== captchaAnswer) {
@@ -1450,6 +2277,12 @@ export default function App() {
         currentMonth,
         currentWeek,
         institution,
+        headmasterName,
+        headmasterNip,
+        headmasterRank,
+        documentCity,
+        schoolNpsn,
+        academicYear,
         profilePhoto,
         homeroomClass
       },
@@ -1465,10 +2298,13 @@ export default function App() {
       homeVisits
     };
 
+    const now = new Date();
+    const datePart = now.toISOString().split('T')[0];
+    const timePart = now.toTimeString().split(' ')[0].replace(/:/g, '-').slice(0, 5);
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData, null, 2));
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `eduasisten_backup_${new Date().toISOString().split('T')[0]}.json`);
+    downloadAnchor.setAttribute("download", `eduasisten_backup_${datePart}_${timePart}.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -1478,46 +2314,7 @@ export default function App() {
   const handleImportBackup = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const json = JSON.parse(event.target?.result as string);
-        if (!json || typeof json !== "object") {
-          throw new Error("Format file cadangan tidak valid.");
-        }
-
-        if (json.teacherProfile) {
-          if (json.teacherProfile.teacherName) setTeacherName(json.teacherProfile.teacherName);
-          if (json.teacherProfile.nip !== undefined) setNip(json.teacherProfile.nip);
-          if (json.teacherProfile.subject) setSubject(json.teacherProfile.subject);
-          if (json.teacherProfile.currentMonth) setCurrentMonth(json.teacherProfile.currentMonth);
-          if (json.teacherProfile.currentWeek) setCurrentWeek(json.teacherProfile.currentWeek);
-          if (json.teacherProfile.institution) setInstitution(json.teacherProfile.institution);
-          if (json.teacherProfile.profilePhoto !== undefined) setProfilePhoto(json.teacherProfile.profilePhoto);
-          if (json.teacherProfile.homeroomClass) setHomeroomClass(json.teacherProfile.homeroomClass);
-        }
-
-        if (Array.isArray(json.students)) setStudents(json.students);
-        if (Array.isArray(json.classList)) setClassList(json.classList);
-        if (Array.isArray(json.attendanceList)) setAttendanceList(json.attendanceList);
-        if (Array.isArray(json.grades)) setGrades(json.grades);
-        if (Array.isArray(json.assignments)) setAssignments(json.assignments);
-        if (Array.isArray(json.submissions)) setSubmissions(json.submissions);
-        if (Array.isArray(json.journals)) setJournals(json.journals);
-        if (Array.isArray(json.schedule)) setSchedule(json.schedule);
-        if (Array.isArray(json.homeroomNotes)) setHomeroomNotes(json.homeroomNotes);
-        if (Array.isArray(json.homeVisits)) setHomeVisits(json.homeVisits);
-
-        setRestoreSuccess(true);
-        setRestoreError("");
-        setTimeout(() => setRestoreSuccess(false), 4000);
-      } catch (err: any) {
-        console.error(err);
-        setRestoreError(err.message || "Gagal memulihkan data. Pastikan file JSON valid.");
-      }
-    };
-    reader.readAsText(file);
+    handleProcessImportFile(file);
     e.target.value = "";
   };
 
@@ -1534,36 +2331,188 @@ export default function App() {
 
 
   // ----------------------------------------------------
-  // NAVIGATION MAPS
+  // NAVIGATION MAPS & ROLE RESTRICTIONS
   // ----------------------------------------------------
-  const navItems = [
-    { id: "dashboard", label: "Beranda", icon: LayoutDashboard },
-    { id: "eduasisten", label: "EduAsisten AI", icon: Bot },
-    { id: "walikelas", label: "Ruang Wali Kelas", icon: ShieldCheck },
-    { id: "absensi", label: "Absensi Digital", icon: CheckSquare },
-    { id: "penilaian", label: "Penilaian AI", icon: Cpu },
-    { id: "jadwal", label: "Jadwal Kelas", icon: Calendar },
-    { id: "tugas", label: "Kelola Tugas", icon: BookOpen },
-    { id: "nilai", label: "Daftar Nilai", icon: FileSpreadsheet },
-    { id: "jurnal", label: "Jurnal Harian", icon: BookOpenText }
-  ];
+  const isStudent = user?.role === 'siswa';
+
+  useEffect(() => {
+    if (isStudent && activeTab !== "dashboard" && activeTab !== "ruangbelajar") {
+      setActiveTab("dashboard");
+    }
+  }, [isStudent, activeTab]);
+
+  const navItems = isStudent
+    ? [
+        { id: "dashboard", label: "Dashboard Siswa", icon: LayoutDashboard },
+        { id: "ruangbelajar", label: "Ruang Belajar", icon: MonitorPlay },
+        { id: "evaluasi", label: "Evaluasi & Ujian (CBT)", icon: ShieldAlert }
+      ]
+    : [
+        { id: "dashboard", label: "Beranda", icon: LayoutDashboard },
+        { id: "ruangbelajar", label: "Ruang Belajar", icon: MonitorPlay },
+        { id: "evaluasi", label: "Evaluasi & Bank Soal (CBT)", icon: ShieldAlert },
+        { id: "eduasisten", label: "EduAsisten AI", icon: Bot },
+        { id: "walikelas", label: "Ruang Wali Kelas", icon: ShieldCheck },
+        { id: "absensi", label: "Absensi Digital", icon: CheckSquare },
+        { id: "penilaian", label: "Penilaian AI", icon: Cpu },
+        { id: "jadwal", label: "Jadwal Kelas", icon: Calendar },
+        { id: "tugas", label: "Kelola Tugas", icon: BookOpen },
+        { id: "nilai", label: "Daftar Nilai", icon: FileSpreadsheet },
+        { id: "jurnal", label: "Jurnal Harian", icon: BookOpenText },
+        ...(user?.role === 'admin'
+            ? [{ id: "manajemen_pengguna", label: "Manajemen Pengguna", icon: Users }] 
+            : user?.role === 'guru'
+            ? [{ id: "verifikasi", label: "Verifikasi Siswa", icon: Users }] 
+            : [])
+      ];
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row antialiased text-slate-800 font-sans">
-      
-      {/* SIDEBAR: Desktop Left Menu Shell */}
+    <>
+      {isAuthChecking ? (
+        <div className="min-h-screen flex items-center justify-center bg-slate-50">
+          <div className="flex flex-col items-center gap-4">
+            <Loader2 size={32} className="animate-spin text-indigo-600" />
+            <p className="text-sm font-bold text-slate-500">Memeriksa sesi...</p>
+          </div>
+        </div>
+      ) : !user ? (
+        <Login onLoginSuccess={() => {}} />
+      ) : user.status === 'pending' ? (
+        <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+          <div className="bg-white p-8 rounded-3xl shadow-xl border border-slate-100 max-w-md w-full text-center space-y-6">
+            <div className="mx-auto w-16 h-16 bg-amber-50 rounded-2xl flex items-center justify-center border border-amber-100">
+              <Clock size={32} className="text-amber-500" />
+            </div>
+            <div>
+              <h2 className="text-xl font-black text-slate-800 mb-2">Akun Menunggu Verifikasi</h2>
+              <p className="text-sm text-slate-500 font-medium">
+                Pendaftaran akun Anda sebagai <span className="font-bold text-indigo-700 uppercase">{user.role}</span> ({user.name}) berhasil tersimpan. Akun Anda sedang menunggu persetujuan dari <span className="font-bold text-slate-700">{user.role === 'guru' ? 'Admin' : 'Guru'}</span>.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2.5">
+              <button
+                onClick={() => window.location.reload()}
+                className="w-full px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+              >
+                <RefreshCw size={16} /> Cek Status Verifikasi
+              </button>
+              <button
+                onClick={() => signOut()}
+                className="w-full px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-bold text-xs transition-colors cursor-pointer"
+              >
+                Keluar / Ganti Akun
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className={`min-h-screen bg-slate-50 flex flex-col md:flex-row antialiased text-slate-800 font-sans theme-${appTheme}`}>
+          <style dangerouslySetInnerHTML={{ __html: `
+            /* Modern Teal Theme overrides */
+            .theme-modern-teal .bg-indigo-700 { background-color: #0f766e !important; }
+            .theme-modern-teal .bg-indigo-600 { background-color: #0d9488 !important; }
+            .theme-modern-teal .bg-indigo-100 { background-color: #ccfbf1 !important; }
+            .theme-modern-teal .bg-indigo-50 { background-color: #f0fdfa !important; }
+            .theme-modern-teal .text-indigo-700 { color: #0f766e !important; }
+            .theme-modern-teal .text-indigo-600 { color: #0d9488 !important; }
+            .theme-modern-teal .text-indigo-200 { color: #99f6e4 !important; }
+            .theme-modern-teal .text-indigo-100 { color: #ccfbf1 !important; }
+            .theme-modern-teal .border-indigo-600 { border-color: #0d9488 !important; }
+            .theme-modern-teal .border-indigo-100 { border-color: #ccfbf1 !important; }
+            .theme-modern-teal .hover\\:bg-indigo-700:hover { background-color: #0f766e !important; }
+            .theme-modern-teal .hover\\:bg-indigo-800:hover { background-color: #115e59 !important; }
+            .theme-modern-teal .bg-white\\/10 { background-color: rgba(255, 255, 255, 0.12) !important; }
+            .theme-modern-teal .bg-indigo-800 { background-color: #115e59 !important; }
+            .theme-modern-teal .border-indigo-600\\/30 { border-color: rgba(13, 148, 136, 0.3) !important; }
+
+            /* Royal Slate Theme overrides */
+            .theme-royal-slate .bg-indigo-700 { background-color: #0f172a !important; }
+            .theme-royal-slate .bg-indigo-600 { background-color: #1e293b !important; }
+            .theme-royal-slate .bg-indigo-100 { background-color: #f1f5f9 !important; }
+            .theme-royal-slate .bg-indigo-50 { background-color: #f8fafc !important; }
+            .theme-royal-slate .text-indigo-700 { color: #334155 !important; }
+            .theme-royal-slate .text-indigo-600 { color: #475569 !important; }
+            .theme-royal-slate .text-indigo-200 { color: #94a3b8 !important; }
+            .theme-royal-slate .text-indigo-100 { color: #cbd5e1 !important; }
+            .theme-royal-slate .border-indigo-600 { border-color: #334155 !important; }
+            .theme-royal-slate .border-indigo-100 { border-color: #e2e8f0 !important; }
+            .theme-royal-slate .hover\\:bg-indigo-700:hover { background-color: #1e293b !important; }
+            .theme-royal-slate .hover\\:bg-indigo-800:hover { background-color: #0f172a !important; }
+            .theme-royal-slate .bg-indigo-800 { background-color: #0f172a !important; }
+            .theme-royal-slate .border-indigo-600\\/30 { border-color: rgba(71, 85, 105, 0.3) !important; }
+
+            /* Aurora Emerald Theme overrides */
+            .theme-aurora-emerald .bg-indigo-700 { background-color: #047857 !important; }
+            .theme-aurora-emerald .bg-indigo-600 { background-color: #059669 !important; }
+            .theme-aurora-emerald .bg-indigo-100 { background-color: #d1fae5 !important; }
+            .theme-aurora-emerald .bg-indigo-50 { background-color: #ecfdf5 !important; }
+            .theme-aurora-emerald .text-indigo-700 { color: #047857 !important; }
+            .theme-aurora-emerald .text-indigo-600 { color: #059669 !important; }
+            .theme-aurora-emerald .text-indigo-200 { color: #a7f3d0 !important; }
+            .theme-aurora-emerald .text-indigo-100 { color: #d1fae5 !important; }
+            .theme-aurora-emerald .border-indigo-600 { border-color: #059669 !important; }
+            .theme-aurora-emerald .border-indigo-100 { border-color: #d1fae5 !important; }
+            .theme-aurora-emerald .hover\\:bg-indigo-700:hover { background-color: #047857 !important; }
+            .theme-aurora-emerald .hover\\:bg-indigo-800:hover { background-color: #065f46 !important; }
+            .theme-aurora-emerald .bg-indigo-800 { background-color: #065f46 !important; }
+            .theme-aurora-emerald .border-indigo-600\\/30 { border-color: rgba(5, 150, 105, 0.3) !important; }
+
+            /* Cosmic Purple Theme overrides */
+            .theme-cosmic-purple .bg-indigo-700 { background-color: #6d28d9 !important; }
+            .theme-cosmic-purple .bg-indigo-600 { background-color: #7c3aed !important; }
+            .theme-cosmic-purple .bg-indigo-100 { background-color: #ede9fe !important; }
+            .theme-cosmic-purple .bg-indigo-50 { background-color: #f5f3ff !important; }
+            .theme-cosmic-purple .text-indigo-700 { color: #6d28d9 !important; }
+            .theme-cosmic-purple .text-indigo-600 { color: #7c3aed !important; }
+            .theme-cosmic-purple .text-indigo-200 { color: #ddd6fe !important; }
+            .theme-cosmic-purple .text-indigo-100 { color: #ede9fe !important; }
+            .theme-cosmic-purple .border-indigo-600 { border-color: #7c3aed !important; }
+            .theme-cosmic-purple .border-indigo-100 { border-color: #ede9fe !important; }
+            .theme-cosmic-purple .hover\\:bg-indigo-700:hover { background-color: #6d28d9 !important; }
+            .theme-cosmic-purple .hover\\:bg-indigo-800:hover { background-color: #5b21b6 !important; }
+            .theme-cosmic-purple .bg-indigo-800 { background-color: #5b21b6 !important; }
+            .theme-cosmic-purple .border-indigo-600\\/30 { border-color: rgba(124, 58, 237, 0.3) !important; }
+
+            /* Rosewood Burgundy Theme overrides */
+            .theme-rosewood-burgundy .bg-indigo-700 { background-color: #be123c !important; }
+            .theme-rosewood-burgundy .bg-indigo-600 { background-color: #e11d48 !important; }
+            .theme-rosewood-burgundy .bg-indigo-100 { background-color: #ffe4e6 !important; }
+            .theme-rosewood-burgundy .bg-indigo-50 { background-color: #fff1f2 !important; }
+            .theme-rosewood-burgundy .text-indigo-700 { color: #be123c !important; }
+            .theme-rosewood-burgundy .text-indigo-600 { color: #e11d48 !important; }
+            .theme-rosewood-burgundy .text-indigo-200 { color: #fecdd3 !important; }
+            .theme-rosewood-burgundy .text-indigo-100 { color: #ffe4e6 !important; }
+            .theme-rosewood-burgundy .border-indigo-600 { border-color: #e11d48 !important; }
+            .theme-rosewood-burgundy .border-indigo-100 { border-color: #ffe4e6 !important; }
+            .theme-rosewood-burgundy .hover\\:bg-indigo-700:hover { background-color: #be123c !important; }
+            .theme-rosewood-burgundy .hover\\:bg-indigo-800:hover { background-color: #9f1239 !important; }
+            .theme-rosewood-burgundy .bg-indigo-800 { background-color: #9f1239 !important; }
+            .theme-rosewood-burgundy .border-indigo-600\\/30 { border-color: rgba(225, 29, 72, 0.3) !important; }
+          ` }} />
+          
+          {/* SIDEBAR: Desktop Left Menu Shell */}
       <aside className="hidden md:flex md:w-64 bg-indigo-700 flex-col justify-between p-6 shrink-0 relative z-20 text-white">
         <div className="space-y-8">
           {/* Logo Brand */}
           <div className="flex items-center gap-3" id="brand-logo">
-            <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-md">
-              <div className="w-5 h-5 bg-indigo-600 rounded-sm rotate-45 flex items-center justify-center">
-                <GraduationCap size={12} className="text-white -rotate-45" />
+            {appLogo ? (
+              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-md overflow-hidden p-1.5 shrink-0">
+                <img src={formatDriveImageUrl(appLogo)} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
               </div>
-            </div>
+            ) : (
+              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-md shrink-0">
+                <div className="w-5 h-5 bg-indigo-600 rounded-sm rotate-45 flex items-center justify-center">
+                  <GraduationCap size={12} className="text-white -rotate-45" />
+                </div>
+              </div>
+            )}
             <div>
-              <h1 className="text-sm font-black tracking-tight font-display text-white">JANG GURU APP HUB</h1>
-              <span className="text-[10px] text-indigo-200 font-bold uppercase tracking-wider">Layanan Administrasi</span>
+              <h1 className="text-sm font-black tracking-tight font-display text-white">
+                {isStudent ? "RUANG BELAJAR SISWA" : "JANG GURU APP HUB"}
+              </h1>
+              <span className="text-[10px] text-indigo-200 font-bold uppercase tracking-wider">
+                {isStudent ? "Portal Siswa Digital" : "Layanan Administrasi"}
+              </span>
             </div>
           </div>
 
@@ -1601,51 +2550,63 @@ export default function App() {
             })}
           </nav>
 
-          {/* Dedicated Firestore Sync Button in Sidebar */}
-          <div className="pt-2">
-            <button
-              onClick={() => setIsCloudSyncModalOpen(true)}
-              className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-extrabold bg-indigo-900/60 hover:bg-indigo-900 text-white border border-indigo-500/30 transition-all cursor-pointer shadow-xs group"
-              title="Klik untuk membuka Pengaturan Sinkronisasi Realtime HP & Laptop"
-            >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                  realtimeSyncStatus === "syncing" 
-                    ? "bg-amber-400 animate-spin" 
-                    : isRealtimeSyncEnabled 
-                    ? "bg-emerald-400 animate-pulse ring-2 ring-emerald-400/20" 
-                    : "bg-slate-400"
-                }`} />
-                <div className="text-left truncate">
-                  <div className="text-[11px] font-black text-white truncate">HP ⇄ Laptop Sync</div>
-                  <div className="text-[9px] text-indigo-300 font-medium truncate">
-                    {lastSyncTime ? `Sync: ${lastSyncTime}` : "Firestore Aktif"}
+          {/* Dedicated Firestore Sync Button in Sidebar (Teachers/Admin Only) */}
+          {!isStudent && (
+            <div className="pt-2">
+              <button
+                onClick={() => setIsCloudSyncModalOpen(true)}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-extrabold bg-indigo-900/60 hover:bg-indigo-900 text-white border border-indigo-500/30 transition-all cursor-pointer shadow-xs group"
+                title="Klik untuk membuka Pengaturan Cadangan & Sinkronisasi Cloud"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                    realtimeSyncStatus === "syncing" 
+                      ? "bg-amber-400 animate-spin" 
+                      : "bg-indigo-400"
+                  }`} />
+                  <div className="text-left truncate">
+                    <div className="text-[11px] font-black text-white truncate">Cadangan Cloud</div>
+                    <div className="text-[9px] text-indigo-300 font-medium truncate">
+                      {lastSyncTime ? `Sync: ${lastSyncTime}` : "Firestore Active"}
+                    </div>
                   </div>
                 </div>
-              </div>
-              <Cloud size={15} className="text-emerald-300 shrink-0 group-hover:scale-110 transition-transform" />
-            </button>
-          </div>
+                <Cloud size={15} className="text-indigo-300 shrink-0 group-hover:scale-110 transition-transform" />
+              </button>
+            </div>
+          )}
         </div>
 
         {/* User Card footer */}
         <div 
-          className="border-t border-indigo-600/30 pt-5 flex items-center gap-3 cursor-pointer hover:bg-white/5 p-2 rounded-xl transition-colors" 
+          className="border-t border-indigo-600/30 pt-5 flex items-center gap-3 cursor-pointer hover:bg-white/5 p-2 rounded-xl transition-colors"
           id="desktop-user-footer"
-          onClick={() => setIsProfileModalOpen(true)}
-          title="Pengaturan Profil & Sekolah"
+          onClick={() => {
+            if (isStudent) {
+              setIsStudentSettingsOpen(true);
+            } else {
+              setIsProfileModalOpen(true);
+            }
+          }}
+          title={isStudent ? "Pengaturan Akun & Profil Siswa" : "Pengaturan Profil & Sekolah"}
         >
           <div className="w-10 h-10 bg-indigo-800 border border-indigo-600/30 text-white rounded-xl shadow-xs shrink-0 overflow-hidden flex items-center justify-center font-bold text-xs">
-            {profilePhoto ? (
-              <img src={profilePhoto} alt={teacherName} className="w-full h-full object-cover" />
+            {user?.photoURL || (!isStudent && profilePhoto) ? (
+              <img src={formatDriveImageUrl(user?.photoURL || profilePhoto)} alt={user?.name || teacherName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
             ) : (
               <User size={18} />
             )}
           </div>
-          <div className="overflow-hidden min-w-0">
-            <p className="font-extrabold text-xs text-white truncate" title={teacherName}>{teacherName || "Nama Guru"}</p>
-            <p className="text-[10px] text-indigo-200 font-medium truncate">{nip ? `NIP. ${nip}` : "Klik untuk atur NIP"}</p>
-            <p className="text-[9px] text-indigo-300/80 font-semibold truncate">{institution ? institution.split('\n').pop() : "Nama Sekolah"}</p>
+          <div className="overflow-hidden min-w-0 flex-1">
+            <p className="font-extrabold text-xs text-white truncate" title={user?.name || teacherName}>
+              {user?.name || (isStudent ? "Akun Siswa" : (teacherName || "Nama Guru"))}
+            </p>
+            <p className="text-[10px] text-indigo-200 font-medium truncate">
+              {isStudent ? (user?.username ? `@${user.username}` : "Siswa") : (nip ? `NIP. ${nip}` : "Klik untuk atur NIP")}
+            </p>
+            <span className="inline-block mt-0.5 px-1.5 py-0.2 bg-white/20 text-white font-black text-[9px] rounded uppercase tracking-wider">
+              {user?.role || "GURU"}
+            </span>
           </div>
         </div>
       </aside>
@@ -1653,15 +2614,23 @@ export default function App() {
       {/* MOBILE SHELL: Top Header & Bottom Navigation Bar */}
       <header className="md:hidden bg-white border-b border-slate-100 px-4 py-3 flex items-center justify-between sticky top-0 z-40 shadow-xs" id="mobile-header">
         <div className="flex items-center gap-2">
-          <div className="p-1.5 bg-indigo-600 text-white rounded-xl">
-            <GraduationCap size={16} />
-          </div>
-          <span className="text-xs font-black tracking-tight text-slate-800 font-display">JANG GURU APP HUB</span>
+          {appLogo ? (
+            <div className="w-8 h-8 bg-slate-50 border border-slate-100 rounded-lg flex items-center justify-center p-1 shrink-0 overflow-hidden">
+              <img src={formatDriveImageUrl(appLogo)} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+            </div>
+          ) : (
+            <div className="p-1.5 bg-indigo-600 text-white rounded-xl">
+              <GraduationCap size={16} />
+            </div>
+          )}
+          <span className="text-xs font-black tracking-tight text-slate-800 font-display">
+            {isStudent ? "RUANG BELAJAR SISWA" : "JANG GURU APP HUB"}
+          </span>
         </div>
 
         <div className="flex items-center gap-1.5">
-          {/* Mobile Background Grading Status Indicator */}
-          {globalGradingStatus.isGrading && activeTab !== "penilaian" && (
+          {/* Mobile Background Grading Status Indicator (Teacher Only) */}
+          {!isStudent && globalGradingStatus.isGrading && activeTab !== "penilaian" && (
             <button
               onClick={() => setActiveTab("penilaian")}
               className="text-[10px] bg-amber-50 text-amber-800 border border-amber-200 font-extrabold px-2 py-1 rounded-lg cursor-pointer flex items-center gap-1 shadow-2xs animate-pulse"
@@ -1672,27 +2641,31 @@ export default function App() {
             </button>
           )}
 
-          {/* Mobile Firestore Sync Button */}
-          <button
-            onClick={() => setIsCloudSyncModalOpen(true)}
-            className="text-[10px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold px-2 py-1 rounded-lg cursor-pointer flex items-center gap-1 shadow-2xs"
-            title="Sinkronisasi Cloud HP ⇄ Laptop"
-          >
-            <span className={`w-2 h-2 rounded-full ${
-              realtimeSyncStatus === "syncing" ? "bg-amber-500 animate-spin" : "bg-emerald-500 animate-pulse"
-            }`} />
-            <Cloud size={11} className="text-emerald-600" />
-            <span className="font-extrabold">Sync</span>
-          </button>
+          {/* Mobile Firestore Sync Button (Teacher Only) */}
+          {!isStudent && (
+            <button
+              onClick={() => setIsCloudSyncModalOpen(true)}
+              className="text-[10px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold px-2 py-1 rounded-lg cursor-pointer flex items-center gap-1 shadow-2xs"
+              title="Sinkronisasi Cloud HP ⇄ Laptop"
+            >
+              <span className={`w-2 h-2 rounded-full ${
+                realtimeSyncStatus === "syncing" ? "bg-amber-500 animate-spin" : "bg-emerald-500 animate-pulse"
+              }`} />
+              <Cloud size={11} className="text-emerald-600" />
+              <span className="font-extrabold">Sync</span>
+            </button>
+          )}
 
-          <button 
-            onClick={() => setIsProfileModalOpen(true)}
-            className="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-100 font-bold px-2 py-1 rounded-lg truncate max-w-[85px] cursor-pointer flex items-center gap-1"
-            title="Buka Pengaturan Profil & Sekolah"
-          >
-            <Building2 size={11} className="shrink-0 text-indigo-600" />
-            <span className="truncate">{institution ? institution.split('\n').pop() : teacherName}</span>
-          </button>
+          {!isStudent && (
+            <button 
+              onClick={() => setIsProfileModalOpen(true)}
+              className="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-100 font-bold px-2 py-1 rounded-lg truncate max-w-[85px] cursor-pointer flex items-center gap-1"
+              title="Buka Pengaturan Profil & Sekolah"
+            >
+              <Building2 size={11} className="shrink-0 text-indigo-600" />
+              <span className="truncate">{institution ? institution.split('\n').pop() : teacherName}</span>
+            </button>
+          )}
 
           <button 
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -1725,10 +2698,18 @@ export default function App() {
             >
               <div className="space-y-6">
                 <div className="flex items-center gap-2 pb-4 border-b border-indigo-600/30">
-                  <div className="p-1.5 bg-white text-indigo-700 rounded-xl">
-                    <GraduationCap size={16} />
-                  </div>
-                  <span className="text-xs font-black tracking-tight text-white font-display">JANG GURU APP HUB</span>
+                  {appLogo ? (
+                    <div className="w-8 h-8 bg-white rounded-xl flex items-center justify-center p-1 shrink-0 overflow-hidden">
+                      <img src={formatDriveImageUrl(appLogo)} alt="Logo" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                    </div>
+                  ) : (
+                    <div className="p-1.5 bg-white text-indigo-700 rounded-xl">
+                      <GraduationCap size={16} />
+                    </div>
+                  )}
+                  <span className="text-xs font-black tracking-tight text-white font-display">
+                    {isStudent ? "RUANG BELAJAR SISWA" : "JANG GURU APP HUB"}
+                  </span>
                 </div>
 
                 <nav className="space-y-1">
@@ -1764,25 +2745,29 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Mobile Teacher Info Card */}
+              {/* Mobile User Info Card */}
               <div 
                 className="border-t border-indigo-600/30 pt-4 flex items-center gap-3 cursor-pointer hover:bg-white/5 p-2 rounded-xl transition-colors"
                 onClick={() => {
                   setMobileMenuOpen(false);
-                  setIsProfileModalOpen(true);
+                  if (isStudent) {
+                    setIsStudentSettingsOpen(true);
+                  } else {
+                    setIsProfileModalOpen(true);
+                  }
                 }}
               >
                 <div className="w-9 h-9 bg-indigo-800 text-white rounded-lg shrink-0 overflow-hidden flex items-center justify-center font-bold text-xs border border-indigo-600/30">
-                  {profilePhoto ? (
-                    <img src={profilePhoto} alt={teacherName} className="w-full h-full object-cover" />
+                  {user?.photoURL || (!isStudent && profilePhoto) ? (
+                    <img src={formatDriveImageUrl(user?.photoURL || profilePhoto)} alt={user?.name || teacherName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                   ) : (
                     <User size={16} />
                   )}
                 </div>
                 <div className="overflow-hidden min-w-0">
-                  <p className="font-extrabold text-[11px] text-white truncate">{teacherName || "Guru"}</p>
-                  <p className="text-[9px] text-indigo-200 font-semibold truncate">{nip ? `NIP. ${nip}` : "Pengaturan"}</p>
-                  <p className="text-[9px] text-indigo-300/80 font-semibold truncate">{institution ? institution.split('\n').pop() : ""}</p>
+                  <p className="font-extrabold text-[11px] text-white truncate">{user?.name || (isStudent ? "Siswa" : (teacherName || "Guru"))}</p>
+                  <p className="text-[9px] text-indigo-200 font-semibold truncate">{isStudent ? (user?.username ? `@${user.username}` : "Siswa") : (nip ? `NIP. ${nip}` : "Pengaturan")}</p>
+                  <p className="text-[9px] text-indigo-300/80 font-semibold truncate">{user?.role?.toUpperCase() || "SISWA"}</p>
                 </div>
               </div>
             </motion.div>
@@ -1801,18 +2786,22 @@ export default function App() {
             </div>
             <div>
               <h3 className="text-xs font-extrabold text-slate-800 tracking-tight whitespace-pre-line leading-snug">
-                {institution || "Pemerintah Provinsi Jawa Barat\nSMA Negeri 2 Tasikmalaya"}
+                {isStudent ? "Portal Ruang Belajar Digital Siswa" : (institution || "Pemerintah Provinsi Jawa Barat\nSMA Negeri 2 Tasikmalaya")}
               </h3>
               <p className="text-[10px] text-slate-500 font-medium">
-                Mata Pelajaran: <strong className="text-indigo-600 font-bold">{subject || "EKONOMI"}</strong>
+                {isStudent ? (
+                  <span>Akses Materi, Modul, dan Media Pembelajaran Interaktif</span>
+                ) : (
+                  <>Mata Pelajaran: <strong className="text-indigo-600 font-bold">{subject || "EKONOMI"}</strong></>
+                )}
               </p>
             </div>
           </div>
 
           {/* Clock, Firestore Sync & Profile Summary */}
           <div className="flex items-center gap-3">
-            {/* Background Grading Status Pill */}
-            {globalGradingStatus.isGrading && activeTab !== "penilaian" && (
+            {/* Background Grading Status Pill (Teacher Only) */}
+            {!isStudent && globalGradingStatus.isGrading && activeTab !== "penilaian" && (
               <button 
                 onClick={() => setActiveTab("penilaian")}
                 className="hidden lg:flex items-center gap-2 px-3.5 py-1.5 bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 rounded-xl text-xs font-bold cursor-pointer shadow-xs animate-pulse transition-all"
@@ -1831,57 +2820,82 @@ export default function App() {
               <span className="text-indigo-600">{currentTime.toLocaleTimeString("id-ID")}</span>
             </div>
 
-            {/* Live Firestore Sync Status Button */}
-            <button
-              onClick={() => setIsCloudSyncModalOpen(true)}
-              className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs group"
-              title="Status Sinkronisasi Firestore Realtime Multi-Perangkat"
-            >
-              <span className={`w-2.5 h-2.5 rounded-full ${
-                realtimeSyncStatus === "syncing"
-                  ? "bg-amber-500 animate-spin"
-                  : isRealtimeSyncEnabled
-                  ? "bg-emerald-500 animate-pulse ring-2 ring-emerald-400/30"
-                  : "bg-slate-400"
-              }`} />
-              <Cloud size={14} className="text-emerald-600 group-hover:scale-110 transition-transform" />
-              <div className="flex flex-col text-left leading-none">
-                <span className="text-[11px] font-extrabold">
-                  {realtimeSyncStatus === "syncing" ? "Menyinkronkan..." : "Cloud Live"}
-                </span>
-                <span className="text-[9px] text-emerald-600 font-medium">
-                  {lastSyncTime ? `Pukul ${lastSyncTime}` : "HP ⇄ Laptop"}
-                </span>
-              </div>
-            </button>
+            {/* Cloud Sync Status Button (Teacher/Admin only) */}
+            {!isStudent && (
+              <button
+                onClick={() => setIsCloudSyncModalOpen(true)}
+                className="flex items-center gap-2 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-900 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs group"
+                title="Status Cadangan & Sinkronisasi Cloud"
+              >
+                <span className={`w-2.5 h-2.5 rounded-full ${
+                  realtimeSyncStatus === "syncing"
+                    ? "bg-amber-500 animate-spin"
+                    : "bg-indigo-600"
+                }`} />
+                <Cloud size={14} className="text-indigo-600 group-hover:scale-110 transition-transform" />
+                <div className="flex flex-col text-left leading-none">
+                  <span className="text-[11px] font-extrabold">
+                    {realtimeSyncStatus === "syncing" ? "Menyinkronkan..." : "Cloud Sync"}
+                  </span>
+                  <span className="text-[9px] text-indigo-600 font-medium">
+                    {lastSyncTime ? `Pukul ${lastSyncTime}` : "Cadangan HP/Laptop"}
+                  </span>
+                </div>
+              </button>
+            )}
 
-            <button
-              onClick={() => setIsProfileModalOpen(true)}
-              className="flex items-center gap-2.5 pl-4 border-l border-slate-200 text-left cursor-pointer hover:opacity-85 transition-opacity"
-              title="Klik untuk membuka Pengaturan Profil & Sekolah"
-            >
-              <div className="text-right">
-                <p className="text-xs font-black text-slate-800">{teacherName || "Nama Guru"}</p>
-                <p className="text-[10px] text-indigo-600 font-bold font-mono">
-                  {nip ? `NIP. ${nip}` : "NIP belum diisi"}
-                </p>
-              </div>
-              <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-extrabold text-xs shadow-xs shrink-0 overflow-hidden border border-indigo-200">
-                {profilePhoto ? (
-                  <img src={profilePhoto} alt={teacherName} className="w-full h-full object-cover" />
-                ) : (
-                  teacherName ? teacherName.split(" ").map(n => n[0]).slice(0, 2).join("") : "GR"
-                )}
-              </div>
-            </button>
+            <div className="flex items-center">
+              <button
+                onClick={() => {
+                  if (isStudent) {
+                    setIsStudentSettingsOpen(true);
+                  } else {
+                    setIsProfileModalOpen(true);
+                  }
+                }}
+                className="flex items-center gap-2.5 pl-4 border-l border-slate-200 text-left cursor-pointer hover:opacity-85 transition-opacity"
+                title={isStudent ? "Pengaturan Akun & Profil Siswa" : "Klik untuk membuka Pengaturan Profil & Sekolah"}
+              >
+                <div className="text-right">
+                  <p className="text-xs font-black text-slate-800 flex items-center justify-end gap-2">
+                    {user?.name || (isStudent ? "Akun Siswa" : (teacherName || "Nama Guru"))}
+                    <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 text-[9px] rounded-md uppercase tracking-wider font-extrabold">{user?.role || "GURU"}</span>
+                  </p>
+                  <p className="text-[10px] text-indigo-600 font-bold font-mono">
+                    {isStudent ? (user?.username ? `@${user.username}` : (user?.email || "Siswa")) : (user?.email || nip || "NIP belum diisi")}
+                  </p>
+                </div>
+                <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-extrabold text-xs shadow-xs shrink-0 overflow-hidden border border-indigo-200">
+                  {user?.photoURL || (!isStudent && profilePhoto) ? (
+                    <img src={formatDriveImageUrl(user?.photoURL || profilePhoto)} alt={user?.name || teacherName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                  ) : (
+                    user?.name ? user.name.split(" ").map(n => n[0]).slice(0, 2).join("") : (isStudent ? "SW" : "GR")
+                  )}
+                </div>
+              </button>
+              
+              <button
+                onClick={async () => {
+                  try {
+                    await signOut();
+                  } catch(e) {
+                    console.error(e);
+                  }
+                }}
+                className="ml-4 p-2 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors cursor-pointer border border-rose-100/50"
+                title="Keluar"
+              >
+                <LogOut size={16} />
+              </button>
+            </div>
           </div>
         </header>
 
         {/* SCROLLABLE VIEWPORT CONTENT WRAPPER */}
         <div className="p-4 md:p-8 flex-1 max-w-7xl w-full mx-auto" id="tab-viewport-body">
           
-          {/* Quick 1-Click Restore Banner if Data is Empty */}
-          {students.length === 0 && (
+          {/* Quick 1-Click Restore Banner if Data is Empty (Teachers/Admin Only) */}
+          {!isStudent && students.length === 0 && (
             <div className="mb-6 bg-gradient-to-r from-amber-500/15 via-amber-500/5 to-white border-2 border-amber-400/50 rounded-2xl p-4 md:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-sm">
               <div className="flex items-center gap-3.5">
                 <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center font-bold shrink-0 shadow-xs">
@@ -1905,20 +2919,24 @@ export default function App() {
           )}
 
           {/* Keep Penilaian alive in the background to prevent losing state or interrupting background AI processes */}
-          <div className={activeTab === "penilaian" ? "block" : "hidden"}>
-            <Penilaian
-              students={students}
-              assignments={assignments}
-              submissions={submissions}
-              onApplyGrade={handleApplyGrade}
-              onApplyBatchGrades={handleApplyBatchGrades}
-              onNavigateToGradebook={() => {
-                setActiveTab("daftarnilai");
-              }}
-              classList={classList}
-              onGradingStateChange={handleGradingStateChange}
-            />
-          </div>
+          {!isStudent && (
+            <div className={activeTab === "penilaian" ? "block" : "hidden"}>
+              <Penilaian
+                students={students}
+                assignments={assignments}
+                submissions={submissions}
+                grades={grades}
+                onApplyGrade={handleApplyGrade}
+                onApplyBatchGrades={handleApplyBatchGrades}
+                onCreateAssignment={handleQuickCreateAssignment}
+                onNavigateToGradebook={() => {
+                  setActiveTab("daftarnilai");
+                }}
+                classList={classList}
+                onGradingStateChange={handleGradingStateChange}
+              />
+            </div>
+          )}
 
           <AnimatePresence mode="wait">
             {activeTab !== "penilaian" && (
@@ -1931,20 +2949,63 @@ export default function App() {
                 id="active-tab-body"
               >
                 {activeTab === "dashboard" && (
-                  <Dashboard
-                    schedule={schedule}
-                    students={students}
-                    journals={journals}
-                    assignments={assignments}
-                    attendanceList={attendanceList}
-                    submissions={submissions}
-                    grades={grades}
-                    activeTab={activeTab}
-                    setActiveTab={setActiveTab}
-                    teacherName={teacherName}
-                    setTeacherName={setTeacherName}
-                    onQuickAction={handleQuickAction}
+                  isStudent ? (
+                    <StudentDashboard
+                      user={user}
+                      schedule={schedule}
+                      assignments={assignments}
+                      submissions={submissions}
+                      grades={grades}
+                      materials={materials}
+                      classList={classList}
+                      onNavigate={(tab) => setActiveTab(tab)}
+                      onOpenSettings={() => setIsStudentSettingsOpen(true)}
+                    />
+                  ) : (
+                    <Dashboard
+                      schedule={schedule}
+                      students={students}
+                      journals={journals}
+                      assignments={assignments}
+                      attendanceList={attendanceList}
+                      submissions={submissions}
+                      grades={grades}
+                      activeTab={activeTab}
+                      setActiveTab={setActiveTab}
+                      teacherName={teacherName}
+                      setTeacherName={setTeacherName}
+                      onQuickAction={handleQuickAction}
+                      classList={classList}
+                    />
+                  )
+                )}
+
+                {activeTab === "ruangbelajar" && (
+                  <RuangBelajar
+                    materials={materials}
+                    onAddMaterial={handleAddMaterial}
+                    onEditMaterial={handleEditMaterial}
+                    onDeleteMaterial={handleDeleteMaterial}
+                    onAddMaterialNote={handleAddMaterialNote}
                     classList={classList}
+                    teacherName={teacherName}
+                    currentUserRole={user?.role}
+                  />
+                )}
+
+                {(activeTab === "evaluasi" || activeTab === "banksoal") && (
+                  <EvaluasiSiswa
+                    isStudent={isStudent}
+                    currentUserRole={user?.role}
+                    availableClasses={classList}
+                    students={students}
+                    subject={subject}
+                    teacherName={teacherName}
+                    bankQuestions={bankQuestions}
+                    onAddBankQuestion={(q) => setBankQuestions(prev => [q, ...prev])}
+                    onEditBankQuestion={(q) => setBankQuestions(prev => prev.map(item => item.id === q.id ? q : item))}
+                    onDeleteBankQuestion={(id) => setBankQuestions(prev => prev.filter(item => item.id !== id))}
+                    initialTab={activeTab === "banksoal" ? "bank_soal" : "daftar"}
                   />
                 )}
 
@@ -1958,12 +3019,19 @@ export default function App() {
                     setHomeroomClass={setHomeroomClass}
                     classList={classList}
                     students={students}
+                    setStudents={setStudents}
                     attendanceList={attendanceList}
                     assignments={assignments}
                     grades={grades}
                     teacherName={teacherName}
                     nip={nip}
                     institution={institution}
+                    headmasterName={headmasterName}
+                    headmasterNip={headmasterNip}
+                    headmasterRank={headmasterRank}
+                    documentCity={documentCity}
+                    schoolNpsn={schoolNpsn}
+                    academicYear={academicYear}
                     notes={homeroomNotes}
                     onAddNote={handleAddHomeroomNote}
                     onDeleteNote={handleDeleteHomeroomNote}
@@ -1977,13 +3045,33 @@ export default function App() {
                   />
                 )}
 
-
                 {activeTab === "absensi" && (
                   <Absensi
                     students={students}
                     attendanceList={attendanceList}
                     onSaveAttendance={handleSaveAttendance}
                     classList={classList}
+                    schedule={schedule}
+                    teacherName={teacherName}
+                    nip={nip}
+                    subject={subject}
+                    institution={institution}
+                    headmasterName={headmasterName}
+                    headmasterNip={headmasterNip}
+                    headmasterRank={headmasterRank}
+                    documentCity={documentCity}
+                    schoolNpsn={schoolNpsn}
+                    academicYear={academicYear}
+                    selectedDate={attendanceDate}
+                    onDateChange={(newDate) => {
+                      setAttendanceDate(newDate);
+                      safeStorage.setItem("guru_attendance_date", newDate);
+                    }}
+                    selectedClass={attendanceClass}
+                    onClassChange={(newClass) => {
+                      setAttendanceClass(newClass);
+                      safeStorage.setItem("guru_attendance_class", newClass);
+                    }}
                   />
                 )}
 
@@ -2050,9 +3138,21 @@ export default function App() {
                 <DaftarNilai
                   students={students}
                   assignments={assignments}
+                  submissions={submissions}
                   grades={grades}
                   onUpdateGradeCell={handleUpdateGradeCell}
+                  onUpdateSubmission={handleUpdateSubmission}
                   classList={classList}
+                  teacherName={teacherName}
+                  nip={nip}
+                  subject={subject}
+                  institution={institution}
+                  headmasterName={headmasterName}
+                  headmasterNip={headmasterNip}
+                  headmasterRank={headmasterRank}
+                  documentCity={documentCity}
+                  schoolNpsn={schoolNpsn}
+                  academicYear={academicYear}
                 />
               )}
 
@@ -2064,6 +3164,14 @@ export default function App() {
                   onDeleteJournal={handleDeleteJournal}
                   classList={classList}
                   teacherProfile={teacherProfileObj}
+                />
+              )}
+
+              {(activeTab === "manajemen_pengguna" || activeTab === "verifikasi") && user && (
+                <VerifikasiPengguna 
+                  currentUserRole={user.role} 
+                  currentUser={user}
+                  classList={classList}
                 />
               )}
             </motion.div>
@@ -2079,21 +3187,32 @@ export default function App() {
 
       {/* MOBILE BOTTOM NAVIGATION RAIL: Premium feel and instant mobile reachability */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-100 flex justify-around py-2.5 z-40 shadow-lg" id="mobile-bottom-bar">
-        {[
+        {(isStudent ? [
           { id: "dashboard", label: "Beranda", icon: LayoutDashboard },
+          { id: "ruangbelajar", label: "Belajar", icon: MonitorPlay },
+          { id: "profil", label: "Profil", icon: User }
+        ] : [
+          { id: "dashboard", label: "Beranda", icon: LayoutDashboard },
+          { id: "ruangbelajar", label: "Belajar", icon: MonitorPlay },
           { id: "eduasisten", label: "Asisten", icon: Bot },
           { id: "absensi", label: "Absen", icon: CheckSquare },
           { id: "penilaian", label: "AI", icon: Cpu },
           { id: "nilai", label: "Nilai", icon: FileSpreadsheet },
           { id: "profil", label: "Profil", icon: User }
-        ].map((item) => {
-          const isActive = item.id === "profil" ? isProfileModalOpen : activeTab === item.id;
+        ]).map((item) => {
+          const isActive = item.id === "profil" 
+            ? (isStudent ? isStudentSettingsOpen : isProfileModalOpen) 
+            : activeTab === item.id;
           return (
             <button
               key={item.id}
               onClick={() => {
                 if (item.id === "profil") {
-                  setIsProfileModalOpen(true);
+                  if (isStudent) {
+                    setIsStudentSettingsOpen(true);
+                  } else {
+                    setIsProfileModalOpen(true);
+                  }
                 } else {
                   setActiveTab(item.id);
                 }
@@ -2103,9 +3222,9 @@ export default function App() {
               }`}
               id={`mobile-bottom-item-${item.id}`}
             >
-              {item.id === "profil" && profilePhoto ? (
+              {item.id === "profil" && (user?.photoURL || (!isStudent && profilePhoto)) ? (
                 <div className={`w-4 h-4 rounded-full overflow-hidden border ${isActive ? "border-indigo-600 ring-1 ring-indigo-400" : "border-slate-300"}`}>
-                  <img src={profilePhoto} alt="Profil" className="w-full h-full object-cover" />
+                  <img src={formatDriveImageUrl(user?.photoURL || profilePhoto)} alt="Profil" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                 </div>
               ) : (
                 <div className="relative">
@@ -2229,7 +3348,7 @@ export default function App() {
                       <div className="relative group shrink-0">
                         <div className="w-20 h-20 sm:w-22 sm:h-22 rounded-2xl bg-indigo-600 text-white flex items-center justify-center font-extrabold text-2xl shadow-md overflow-hidden border-2 border-white ring-2 ring-indigo-200/80">
                           {profilePhoto ? (
-                            <img src={profilePhoto} alt={teacherName} className="w-full h-full object-cover" />
+                            <img src={formatDriveImageUrl(profilePhoto)} alt={teacherName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                           ) : (
                             <User size={38} className="text-white/80" />
                           )}
@@ -2250,7 +3369,7 @@ export default function App() {
                         </label>
                       </div>
 
-                      <div className="space-y-1.5 text-center sm:text-left flex-1">
+                      <div className="space-y-1.5 text-center sm:text-left flex-1 w-full">
                         <div className="flex items-center justify-center sm:justify-start gap-2">
                           <h3 className="text-sm font-extrabold text-slate-800">Foto Profil Guru</h3>
                           {profilePhoto && (
@@ -2260,7 +3379,7 @@ export default function App() {
                           )}
                         </div>
                         <p className="text-xs text-slate-500 font-medium leading-relaxed">
-                          Unggah foto profil resmi untuk ditampilkan di header aplikasi, sidebar, serta laporan administratif.
+                          Unggah foto profil resmi atau tempel link Google Drive untuk ditampilkan di header aplikasi, sidebar, serta laporan administratif.
                         </p>
 
                         <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 pt-1">
@@ -2287,6 +3406,20 @@ export default function App() {
                               <Trash2 size={13} /> Hapus Foto
                             </button>
                           )}
+                        </div>
+
+                        {/* Google Drive Link Input */}
+                        <div className="pt-2 text-left">
+                          <label className="block text-[10px] font-extrabold text-slate-600 mb-1">
+                            Atau Tempel Link Foto (Google Drive / URL Gambar):
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="https://drive.google.com/file/d/... atau URL foto"
+                            value={profilePhoto}
+                            onChange={(e) => setProfilePhoto(formatDriveImageUrl(e.target.value))}
+                            className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-slate-800"
+                          />
                         </div>
                       </div>
                     </div>
@@ -2371,6 +3504,507 @@ export default function App() {
                           className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all text-sm font-medium"
                           placeholder="Contoh: 2"
                         />
+                      </div>
+                    </div>
+
+                    {/* SECTION: DATA KEPALA SEKOLAH (PENGESAHAN DOKUMEN CETAK) */}
+                    <div className="pt-4 border-t border-slate-100 space-y-4">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">
+                          🏛️
+                        </div>
+                        <div>
+                          <h4 className="text-xs font-black text-slate-800 uppercase tracking-wide">Data Kepala Sekolah (Pimpinan & Pengesahan)</h4>
+                          <p className="text-[11px] text-slate-400 font-medium">Digunakan untuk tanda tangan mengetahui pada dokumen cetak PDF, Jurnal, Nilai, & Rekap</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">Nama Lengkap & Gelar Kepala Sekolah</label>
+                        <input 
+                          type="text" 
+                          value={headmasterName} 
+                          onChange={(e) => setHeadmasterName(e.target.value)}
+                          className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all text-sm font-semibold"
+                          placeholder="Contoh: Dr. Hj. Yanti Suryanti, M.Pd."
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">NIP Kepala Sekolah</label>
+                          <input 
+                            type="text" 
+                            value={headmasterNip} 
+                            onChange={(e) => setHeadmasterNip(e.target.value)}
+                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all text-sm font-medium"
+                            placeholder="Contoh: 197005121995122001"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">Pangkat / Golongan Ruang</label>
+                          <input 
+                            type="text" 
+                            value={headmasterRank} 
+                            onChange={(e) => setHeadmasterRank(e.target.value)}
+                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all text-sm font-medium"
+                            placeholder="Contoh: Pembina Utama Muda, IV/c"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* SECTION: DATA IDENTITAS DOKUMEN & PENGESAHAN */}
+                    <div className="pt-4 border-t border-slate-100 space-y-4">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold text-xs">
+                          📍
+                        </div>
+                        <div>
+                          <h4 className="text-xs font-black text-slate-800 uppercase tracking-wide">Identitas Administrasi Cetak Dokumen</h4>
+                          <p className="text-[11px] text-slate-400 font-medium">Kota titimangsa, NPSN, dan Tahun Pelajaran resmi</p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">Kota / Kab. Pengesahan</label>
+                          <input 
+                            type="text" 
+                            value={documentCity} 
+                            onChange={(e) => setDocumentCity(e.target.value)}
+                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all text-sm font-medium"
+                            placeholder="Contoh: Tasikmalaya"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">NPSN Sekolah</label>
+                          <input 
+                            type="text" 
+                            value={schoolNpsn} 
+                            onChange={(e) => setSchoolNpsn(e.target.value)}
+                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all text-sm font-medium"
+                            placeholder="Contoh: 20224510"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">Tahun Pelajaran & Smt</label>
+                          <input 
+                            type="text" 
+                            value={academicYear} 
+                            onChange={(e) => setAcademicYear(e.target.value)}
+                            className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all text-sm font-medium"
+                            placeholder="Contoh: 2025/2026 (Genap)"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="p-3 bg-indigo-50/70 border border-indigo-100 rounded-xl flex items-start gap-2.5 text-xs text-indigo-900">
+                        <span className="text-base">✨</span>
+                        <p className="leading-relaxed">
+                          <strong>Integrasi Otomatis:</strong> Data Kepala Sekolah dan titimangsa kota di atas langsung diterapkan pada lembar cetak <em>Jurnal Harian</em>, <em>Daftar Nilai</em>, <em>Rekap Absensi</em>, <em>Laporan Wali Kelas</em>, dan dokumen administrasi Kurikulum Merdeka.
+                        </p>
+                      </div>
+
+                      {/* SECTION: TAMPILAN & DESAIN APLIKASI (MODERN & MENARIK) */}
+                      <div className="pt-6 border-t border-slate-100 space-y-4">
+                        <div className="flex items-center gap-2">
+                          <div className="w-8 h-8 rounded-xl bg-violet-50 text-violet-600 flex items-center justify-center font-bold text-xs">
+                            🎨
+                          </div>
+                          <div>
+                            <h4 className="text-xs font-black text-slate-800 uppercase tracking-wide">Pilihan Tampilan & Tema Aplikasi</h4>
+                            <p className="text-[11px] text-slate-400 font-medium">Ubah tema visual sistem menjadi lebih modern, menarik, dan ramah mata</p>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                          {[
+                            { id: "classic-indigo", label: "Classic Indigo", desc: "Profesional & Resmi", color: "bg-indigo-600" },
+                            { id: "modern-teal", label: "Modern Teal", desc: "Segar & Energik", color: "bg-teal-600" },
+                            { id: "royal-slate", label: "Royal Slate", desc: "Premium & Elegan", color: "bg-slate-800" },
+                            { id: "aurora-emerald", label: "Aurora Emerald", desc: "Teduh & Edukatif", color: "bg-emerald-600" },
+                            { id: "cosmic-purple", label: "Cosmic Purple", desc: "Kreatif & Estetik", color: "bg-purple-600" },
+                            { id: "rosewood-burgundy", label: "Rosewood Burgundy", desc: "Mewah & Hangat", color: "bg-rose-600" },
+                          ].map((t) => (
+                            <button
+                              key={t.id}
+                              type="button"
+                              onClick={() => setAppTheme(t.id)}
+                              className={`p-3 rounded-2xl border text-left transition-all relative overflow-hidden cursor-pointer ${
+                                appTheme === t.id
+                                  ? "border-indigo-600 bg-indigo-50/20 ring-2 ring-indigo-600/20"
+                                  : "border-slate-200 bg-white hover:bg-slate-50"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className={`w-3.5 h-3.5 rounded-full ${t.color} shrink-0`} />
+                                <span className="text-xs font-bold text-slate-800 truncate">{t.label}</span>
+                              </div>
+                              <span className="block text-[10px] text-slate-400 mt-1">{t.desc}</span>
+                              {appTheme === t.id && (
+                                <div className="absolute right-2 top-2 w-3.5 h-3.5 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[8px] font-bold">
+                                  ✓
+                                </div>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* SECTION: BRANDING LOGO APLIKASI (KHUSUS ADMIN) */}
+                      {user?.role === 'admin' && (
+                        <div className="pt-6 border-t border-slate-100 space-y-4">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">
+                                👑
+                              </div>
+                              <div>
+                                <h4 className="text-xs font-black text-slate-800 uppercase tracking-wide">Logo & Branding Aplikasi (Khusus Admin)</h4>
+                                <p className="text-[11px] text-slate-400 font-medium">Ubah logo utama sistem untuk seluruh pengguna aplikasi</p>
+                              </div>
+                            </div>
+                            {appLogo && (
+                              <button
+                                type="button"
+                                onClick={() => setAppLogo("")}
+                                className="text-[10px] text-rose-600 hover:text-rose-700 font-bold hover:underline cursor-pointer"
+                              >
+                                Reset Logo
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3.5">
+                            {appLogo ? (
+                              <div className="flex items-center gap-3">
+                                <div className="w-14 h-14 bg-white rounded-xl border border-slate-200 p-2 shrink-0 flex items-center justify-center shadow-2xs overflow-hidden">
+                                  <img
+                                    src={formatDriveImageUrl(appLogo)}
+                                    alt="Logo Aplikasi"
+                                    className="w-full h-full object-contain"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                </div>
+                                <div>
+                                  <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
+                                    Logo Kustom Aktif
+                                  </span>
+                                  <p className="text-[10px] text-slate-400 mt-1">Logo ini menggantikan icon topi toga bawaan di sidebar desktop, header mobile, dan menu drawer.</p>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-3">
+                                <div className="w-14 h-14 bg-indigo-50 rounded-xl border border-indigo-100 shrink-0 flex items-center justify-center text-indigo-600">
+                                  <GraduationCap size={28} />
+                                </div>
+                                <div>
+                                  <span className="text-[11px] font-bold text-slate-500 bg-slate-100 border border-slate-200 px-2.5 py-0.5 rounded-full">
+                                    Logo Default Bawaan
+                                  </span>
+                                  <p className="text-[10px] text-slate-400 mt-1">Menggunakan icon topi akademis default EduAsisten AI.</p>
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="space-y-1.5">
+                              <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wide flex items-center gap-1">
+                                📁 Unggah Berkas Logo Baru
+                              </label>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  try {
+                                    const compressed = await compressImage(file, 600, 0.85);
+                                    setAppLogo(compressed);
+                                  } catch (err) {
+                                    console.error("Gagal memproses logo:", err);
+                                  }
+                                }}
+                                className="block w-full text-xs text-slate-500 file:mr-2 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-[11px] file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 file:cursor-pointer border border-slate-200 rounded-xl bg-white p-1"
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wide flex items-center gap-1">
+                                🔗 Atau Link Google Drive / URL Gambar Logo
+                              </label>
+                              <input
+                                type="text"
+                                placeholder="https://drive.google.com/file/d/... atau direct URL logo"
+                                value={appLogo}
+                                onChange={(e) => setAppLogo(formatDriveImageUrl(e.target.value))}
+                                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-mono text-slate-800 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* SECTION: CONFIGURATION KOP SURAT LAPORAN */}
+                      <div className="pt-6 border-t border-slate-100 space-y-4 text-left">
+                        <div className="flex items-center gap-2">
+                          <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">
+                            📝
+                          </div>
+                          <div>
+                            <h4 className="text-xs font-black text-slate-800 uppercase tracking-wide">Konfigurasi Kop Surat Laporan</h4>
+                            <p className="text-[11px] text-slate-400 font-medium font-display">Atur logo dan kop surat resmi sekolah untuk seluruh dokumen cetak & PDF</p>
+                          </div>
+                        </div>
+
+                        <div className="bg-slate-50/70 rounded-2xl p-4 border border-slate-200/60 space-y-4">
+                          {/* Main Toggle Switch */}
+                          <div className="flex items-center justify-between bg-white p-3.5 rounded-xl border border-slate-100">
+                            <div>
+                              <p className="text-xs font-bold text-slate-700">Aktifkan Kop Surat Resmi</p>
+                              <p className="text-[10px] text-slate-400 mt-0.5">Tampilkan kop resmi di lembar presensi, nilai, dan administrasi</p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setUseKop(!useKop)}
+                              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                useKop ? "bg-indigo-600" : "bg-slate-200"
+                              }`}
+                            >
+                              <span
+                                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-xs ring-0 transition duration-200 ease-in-out ${
+                                  useKop ? "translate-x-5" : "translate-x-0"
+                                }`}
+                              />
+                            </button>
+                          </div>
+
+                          {useKop && (
+                            <div className="space-y-4">
+                              {/* Kop Type Tab Selection */}
+                              <div className="flex bg-slate-200/80 p-1 rounded-xl w-fit">
+                                <button
+                                  type="button"
+                                  onClick={() => setKopType("manual")}
+                                  className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                                    kopType === "manual"
+                                      ? "bg-white text-indigo-600 shadow-sm"
+                                      : "text-slate-500 hover:text-slate-800"
+                                  }`}
+                                >
+                                  <FileText size={13} />
+                                  Kop Teks Manual
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setKopType("image")}
+                                  className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                                    kopType === "image"
+                                      ? "bg-white text-indigo-600 shadow-sm"
+                                      : "text-slate-500 hover:text-slate-800"
+                                  }`}
+                                >
+                                  <ImageIcon size={13} />
+                                  Impor Gambar Kop
+                                </button>
+                              </div>
+
+                              {kopType === "manual" ? (
+                                <div className="space-y-4">
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-white p-4 rounded-xl border border-slate-100">
+                                    <div className="sm:col-span-2 space-y-1">
+                                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Baris 1: Pemerintah Daerah / Yayasan</label>
+                                      <input
+                                        type="text"
+                                        value={kopManual.line1}
+                                        onChange={(e) => setKopManual({ ...kopManual, line1: e.target.value })}
+                                        placeholder="PEMERINTAH PROVINSI JAWA BARAT"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-700 focus:outline-none focus:border-indigo-500 font-medium"
+                                      />
+                                    </div>
+                                    <div className="sm:col-span-2 space-y-1">
+                                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Baris 2: Dinas / Bidang Pendidikan</label>
+                                      <input
+                                        type="text"
+                                        value={kopManual.line2}
+                                        onChange={(e) => setKopManual({ ...kopManual, line2: e.target.value })}
+                                        placeholder="DINAS PENDIDIKAN"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-700 focus:outline-none focus:border-indigo-500 font-medium"
+                                      />
+                                    </div>
+                                    <div className="sm:col-span-2 space-y-1">
+                                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Baris 3: Nama Instansi Utama / Sekolah (Besar)</label>
+                                      <input
+                                        type="text"
+                                        value={kopManual.line3}
+                                        onChange={(e) => setKopManual({ ...kopManual, line3: e.target.value })}
+                                        placeholder="SMA NEGERI 2 TASIKMALAYA"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-800 font-bold focus:outline-none focus:border-indigo-500"
+                                      />
+                                    </div>
+                                    <div className="space-y-1">
+                                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Baris 4: Jalan & Nomor Telepon</label>
+                                      <input
+                                        type="text"
+                                        value={kopManual.line4}
+                                        onChange={(e) => setKopManual({ ...kopManual, line4: e.target.value })}
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-700 focus:outline-none focus:border-indigo-500 font-medium"
+                                      />
+                                    </div>
+                                    <div className="space-y-1">
+                                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Baris 5: Website & Email Resmi</label>
+                                      <input
+                                        type="text"
+                                        value={kopManual.line5}
+                                        onChange={(e) => setKopManual({ ...kopManual, line5: e.target.value })}
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-700 focus:outline-none focus:border-indigo-500 font-medium"
+                                      />
+                                    </div>
+                                  </div>
+
+                                  {/* LOGO SETTINGS FOR MANUAL TEXT */}
+                                  <div className="bg-white p-4 rounded-xl border border-slate-100 space-y-3.5 text-left">
+                                    <div className="flex items-center gap-1.5 pb-2 border-b border-slate-100">
+                                      <span className="text-xs">🛡️</span>
+                                      <h5 className="text-xs font-bold text-slate-700">Logo Kop Manual</h5>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                      {/* Logo Upload */}
+                                      <div className="space-y-2">
+                                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">Pilih Gambar Logo</label>
+                                        {kopLogo ? (
+                                          <div className="flex items-center gap-3 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+                                            <div className="w-10 h-10 bg-white rounded border p-1 shrink-0 flex items-center justify-center">
+                                              <img src={kopLogo} className="max-h-full max-w-full object-contain" referrerPolicy="no-referrer" />
+                                            </div>
+                                            <button
+                                              type="button"
+                                              onClick={() => setKopLogo("")}
+                                              className="text-[10px] text-rose-600 bg-rose-50 px-2 py-1 rounded font-bold hover:bg-rose-100 cursor-pointer"
+                                            >
+                                              Hapus Logo
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <label className="flex items-center gap-1.5 px-3 py-2 border border-dashed border-slate-300 hover:border-indigo-500 rounded-lg cursor-pointer bg-slate-50 text-xs font-bold text-slate-600 hover:text-slate-800 transition-all justify-center">
+                                            <Upload size={13} />
+                                            Unggah Logo Sekolah
+                                            <input
+                                              type="file"
+                                              accept="image/*"
+                                              className="hidden"
+                                              onChange={(e) => {
+                                                const file = e.target.files?.[0];
+                                                if (file) {
+                                                  const reader = new FileReader();
+                                                  reader.onload = (ev) => setKopLogo(ev.target?.result as string);
+                                                  reader.readAsDataURL(file);
+                                                }
+                                              }}
+                                            />
+                                          </label>
+                                        )}
+                                      </div>
+
+                                      {/* Logo Position */}
+                                      <div className="space-y-1.5">
+                                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">Posisi Penempatan Logo</label>
+                                        <div className="grid grid-cols-4 gap-1 bg-slate-100 p-0.5 rounded-lg">
+                                          {[
+                                            { id: "left", label: "Kiri" },
+                                            { id: "right", label: "Kanan" },
+                                            { id: "both", label: "Kiri+Kanan" },
+                                            { id: "none", label: "Tanpa" }
+                                          ].map((pos) => (
+                                            <button
+                                              key={pos.id}
+                                              type="button"
+                                              onClick={() => setKopLogoPosition(pos.id as any)}
+                                              className={`py-1 text-[10px] font-bold rounded cursor-pointer transition-all ${
+                                                kopLogoPosition === pos.id
+                                                  ? "bg-white text-indigo-600 shadow-2xs"
+                                                  : "text-slate-500 hover:text-slate-800"
+                                              }`}
+                                            >
+                                              {pos.label}
+                                            </button>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    {kopLogo && kopLogoPosition !== "none" && (
+                                      <div className="space-y-1.5 pt-2">
+                                        <div className="flex justify-between items-center text-[10px] font-bold text-slate-500">
+                                          <span>Ukuran Tinggi Logo</span>
+                                          <span className="text-indigo-600">{kopLogoSize} px</span>
+                                        </div>
+                                        <input
+                                          type="range"
+                                          min="30"
+                                          max="100"
+                                          value={kopLogoSize}
+                                          onChange={(e) => setKopLogoSize(parseInt(e.target.value, 10))}
+                                          className="w-full accent-indigo-600 cursor-pointer"
+                                        />
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="bg-white p-4 rounded-xl border border-slate-100 space-y-3 flex flex-col items-center">
+                                  {kopImage ? (
+                                    <div className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50 flex flex-col items-center gap-3">
+                                      <div className="border border-slate-300 rounded bg-white p-2.5 shadow-2xs w-full flex justify-center">
+                                        <img
+                                          src={kopImage}
+                                          alt="Preview Kop Sekolah"
+                                          className="max-h-24 object-contain"
+                                          referrerPolicy="no-referrer"
+                                        />
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded">Gambar Terpasang</span>
+                                        <button
+                                          type="button"
+                                          onClick={() => setKopImage("")}
+                                          className="flex items-center gap-1 text-[10px] text-rose-600 hover:text-rose-800 font-bold bg-rose-50 px-2.5 py-1 rounded transition-all cursor-pointer"
+                                        >
+                                          <Trash2 size={12} /> Hapus Gambar
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <label className="w-full flex flex-col items-center justify-center border-2 border-dashed border-slate-300 hover:border-indigo-500 rounded-xl p-6 bg-slate-50/50 hover:bg-slate-50 cursor-pointer transition-all">
+                                      <div className="flex flex-col items-center text-center">
+                                        <Upload size={24} className="text-slate-400 mb-2" />
+                                        <span className="text-xs font-bold text-slate-700">Unggah Gambar Kop Surat Utama</span>
+                                        <span className="text-[10px] text-slate-400 mt-1">Disarankan berukuran landscape memanjang</span>
+                                      </div>
+                                      <input
+                                        type="file"
+                                        accept="image/*"
+                                        className="hidden"
+                                        onChange={(e) => {
+                                          const file = e.target.files?.[0];
+                                          if (file) {
+                                            const reader = new FileReader();
+                                            reader.onload = (ev) => setKopImage(ev.target?.result as string);
+                                            reader.readAsDataURL(file);
+                                          }
+                                        }}
+                                      />
+                                    </label>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -2804,13 +4438,13 @@ export default function App() {
                         <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
                           {students
                             .filter(s => s.className === (selectedStudentClassFilter || classList[0]))
-                            .map((student) => {
+                            .map((student, sIdx) => {
                               const isEditing = editingStudent?.id === student.id;
                               const isDeleting = deletingStudentId === student.id;
 
                               return (
                                 <div 
-                                  key={student.id}
+                                  key={`${student.id}_${sIdx}`}
                                   className="p-3 bg-slate-50 border border-slate-200/80 rounded-2xl transition-all"
                                 >
                                   {isEditing ? (
@@ -2923,29 +4557,48 @@ export default function App() {
                       <div className="space-y-1 relative z-10">
                         <div className="flex items-center gap-2">
                           <h4 className="text-sm font-black tracking-tight text-white">
-                            Pencadangan Data Harian & Google Drive
+                            Pencadangan Lengkap: Profil, Absensi, Wali Kelas, Nilai & Jurnal
                           </h4>
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
-                            Otomatis Akhir Hari
+                            Cloud & Google Drive
                           </span>
                         </div>
                         <p className="text-[11px] text-indigo-200 leading-relaxed font-medium">
-                          Setiap akhir hari, sistem secara otomatis mencadangkan seluruh data administrasi Anda (Siswa, Absensi, Nilai, Jurnal, Tugas) ke Database Cloud Firestore. Anda juga dapat mengunduh berkas cadangan untuk disimpan di Google Drive.
+                          Sistem mencadangkan seluruh data administrasi Anda: <strong>Profil Guru</strong>, <strong>Foto Profil</strong>, <strong>Data Absensi Kehadiran</strong>, <strong>Kegiatan Ruang Wali Kelas (Catatan & Home Visit)</strong>, <strong>Daftar Nilai</strong>, <strong>Tugas</strong>, <strong>Jadwal</strong>, dan <strong>Jurnal Mengajar</strong> ke Database Cloud Firestore secara otomatis, serta berkas unduhan untuk Google Drive.
                         </p>
                       </div>
                     </div>
 
-                    {restoreSuccess && (
-                      <div className="p-3.5 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-2xl text-xs font-bold flex items-center gap-2.5 animate-in fade-in">
-                        <CheckCircle2 size={18} className="shrink-0 text-emerald-600" />
-                        <span>Data berhasil dipulihkan secara penuh!</span>
+                    {restoreSuccessMsg && (
+                      <div className="p-3.5 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-2xl text-xs font-bold flex items-start gap-2.5 animate-in fade-in">
+                        <CheckCircle2 size={18} className="shrink-0 text-emerald-600 mt-0.5" />
+                        <div className="flex-1">
+                          <p className="font-extrabold">{restoreSuccessMsg}</p>
+                          <p className="text-[10.5px] text-emerald-700 mt-0.5">Semua data telah dimuat ke aplikasi dan otomatis disinkronkan ke Cloud.</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setRestoreSuccessMsg(null)}
+                          className="text-emerald-500 hover:text-emerald-700 text-xs font-bold cursor-pointer"
+                        >
+                          ✕
+                        </button>
                       </div>
                     )}
 
-                    {restoreError && (
-                      <div className="p-3.5 bg-rose-50 border border-rose-200 text-rose-900 rounded-2xl text-xs font-bold flex items-center gap-2.5 animate-in fade-in">
-                        <AlertCircle size={18} className="shrink-0 text-rose-600" />
-                        <span>{restoreError}</span>
+                    {restoreErrorMsg && (
+                      <div className="p-3.5 bg-rose-50 border border-rose-200 text-rose-900 rounded-2xl text-xs font-bold flex items-start gap-2.5 animate-in fade-in">
+                        <AlertCircle size={18} className="shrink-0 text-rose-600 mt-0.5" />
+                        <div className="flex-1">
+                          <p className="font-extrabold">{restoreErrorMsg}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setRestoreErrorMsg(null)}
+                          className="text-rose-500 hover:text-rose-700 text-xs font-bold cursor-pointer"
+                        >
+                          ✕
+                        </button>
                       </div>
                     )}
 
@@ -2964,79 +4617,192 @@ export default function App() {
                       </div>
                     )}
 
+                    {driveBackupNotice && (
+                      <div className={`p-3.5 rounded-2xl text-xs font-bold flex items-center gap-2.5 border animate-in fade-in ${
+                        driveBackupNotice.type === "success" 
+                          ? "bg-emerald-50 border-emerald-200 text-emerald-900" 
+                          : "bg-rose-50 border-rose-200 text-rose-900"
+                      }`}>
+                        {driveBackupNotice.type === "success" ? (
+                          <CheckCircle2 size={18} className="shrink-0 text-emerald-600" />
+                        ) : (
+                          <AlertCircle size={18} className="shrink-0 text-rose-600" />
+                        )}
+                        <span>{driveBackupNotice.message}</span>
+                      </div>
+                    )}
+
                     {/* SECTION 1: Automatic Daily Cloud Database Backup */}
                     <div className="p-5 bg-white border border-slate-200 rounded-3xl space-y-4 shadow-xs">
                       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                         <div className="space-y-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="w-6 h-6 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs">1</span>
-                            <h5 className="text-xs font-extrabold text-slate-900">Cadangan Harian ke Database Cloud</h5>
+                            <h5 className="text-xs font-extrabold text-slate-900">Cadangan Harian ke Database Cloud (Jadwal Jam 14:00 / 2 Siang)</h5>
+                            <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-extrabold">
+                              ⚡ Kapasitas Ekstra Besar (Hingga 50 MB+)
+                            </span>
                           </div>
                           <p className="text-[11px] text-slate-500 pl-8">
-                            Status pencadangan otomatis hari ini: {lastDailyBackupDate ? (
-                              <strong className="text-emerald-700 font-bold">Terakhir disimpan tanggal {lastDailyBackupDate}</strong>
+                            Status pencadangan hari ini: {lastDailyBackupDate ? (
+                              <strong className="text-emerald-700 font-bold">Terakhir disimpan: {lastDailyBackupDate}</strong>
                             ) : (
-                              <span className="text-amber-600 font-bold">Belum ada cadangan hari ini</span>
+                              <span className="text-amber-600 font-bold">Belum ada cadangan tersimpan hari ini</span>
                             )}
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => triggerDailyBackup(true)}
-                          disabled={isDailyBackupSaving}
-                          className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-xs flex items-center gap-2 cursor-pointer shrink-0 disabled:opacity-50"
-                        >
-                          <UploadCloud size={16} className={isDailyBackupSaving ? "animate-bounce" : ""} />
-                          {isDailyBackupSaving ? "Menyimpan Cadangan..." : "Cadangkan ke Database Sekarang"}
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2 pl-8 sm:pl-0">
+                          <button
+                            type="button"
+                            onClick={() => triggerDailyBackup(true, "14:00 WIB (Jam 2 Siang)")}
+                            disabled={isDailyBackupSaving || isDriveBackupSaving}
+                            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-xs flex items-center gap-2 cursor-pointer shrink-0 disabled:opacity-50"
+                          >
+                            <Zap size={15} className="text-amber-300" />
+                            {isDailyBackupSaving ? "Menyimpan..." : "Cadangkan Snapshot Jam 14:00"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => triggerDailyBackup(true)}
+                            disabled={isDailyBackupSaving || isDriveBackupSaving}
+                            className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-xs flex items-center gap-2 cursor-pointer shrink-0 disabled:opacity-50"
+                          >
+                            <UploadCloud size={16} className={isDailyBackupSaving ? "animate-bounce" : ""} />
+                            {isDailyBackupSaving ? "Menyimpan..." : "Cadangkan Sekarang"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => loginForDriveBackup()}
+                            disabled={isDailyBackupSaving || isDriveBackupSaving}
+                            className="px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-xs flex items-center gap-2 cursor-pointer shrink-0 disabled:opacity-50"
+                          >
+                            <Database size={16} className={isDriveBackupSaving ? "animate-bounce" : ""} />
+                            {isDriveBackupSaving ? "Menyimpan ke Drive..." : "Backup ke Google Drive"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Schedule settings row */}
+                      <div className="pl-8 pt-1 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-t border-slate-100">
+                        <div className="space-y-0.5">
+                          <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                            <Clock size={14} className="text-indigo-600" />
+                            Jadwal Otomatis Akhir Jam Mengajar:
+                          </span>
+                          <p className="text-[10.5px] text-slate-500">
+                            Aplikasi secara otomatis mencadangkan data ke Cloud saat jam menunjukkan waktu ini setiap hari.
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {["14:00", "15:00", "16:00"].map((timePreset) => (
+                            <button
+                              key={timePreset}
+                              type="button"
+                              onClick={() => {
+                                setDailyBackupScheduleTime(timePreset);
+                                safeStorage.setItem("guru_daily_backup_schedule_time", timePreset);
+                              }}
+                              className={`px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
+                                dailyBackupScheduleTime === timePreset
+                                  ? "bg-indigo-600 text-white shadow-2xs"
+                                  : "bg-slate-100 hover:bg-slate-200 text-slate-700"
+                              }`}
+                            >
+                              {timePreset} {timePreset === "14:00" ? "(2 Siang)" : ""}
+                            </button>
+                          ))}
+                          <input
+                            type="time"
+                            value={dailyBackupScheduleTime}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val) {
+                                setDailyBackupScheduleTime(val);
+                                safeStorage.setItem("guru_daily_backup_schedule_time", val);
+                              }
+                            }}
+                            className="px-2 py-1 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-indigo-500 cursor-pointer"
+                          />
+                        </div>
                       </div>
 
                       <div className="p-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-[11px] text-slate-600 flex items-start gap-2.5">
                         <Zap size={16} className="text-amber-500 shrink-0 mt-0.5" />
                         <span>
-                          <strong>Fitur Otomatis Akhir Hari:</strong> Aplikasi secara cerdas mendeteksi pergantian hari dan otomatis menyimpan snapshot data Anda ke Firestore Cloud setiap kali Anda menutup atau membuka aplikasi.
+                          <strong>Fitur Otomatis Jam 14:00 (2 Siang):</strong> Aplikasi secara otomatis mendeteksi pergantian hari dan jam kerja (default <strong>14:00 WIB</strong>) untuk menyimpan snapshot data ke Firestore Cloud agar data mengajar dan penilaian hari ini tersimpan aman.
                         </span>
                       </div>
                     </div>
 
-                    {/* SECTION 2: Google Drive & File JSON Backup */}
+                    {/* SECTION 2: Riwayat Cadangan Google Drive */}
                     <div className="p-5 bg-white border border-slate-200 rounded-3xl space-y-4 shadow-xs">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="w-6 h-6 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs">2</span>
-                          <h5 className="text-xs font-extrabold text-slate-900">Cadangkan ke Google Drive / Berkas (.json)</h5>
+                      <div className="flex items-center justify-between">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="w-6 h-6 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs">2</span>
+                            <h5 className="text-xs font-extrabold text-slate-900">Riwayat Cadangan di Google Drive</h5>
+                          </div>
+                          <p className="text-[11px] text-slate-500 pl-8">
+                            Daftar berkas cadangan yang tersimpan aman di akun Google Drive Anda.
+                          </p>
                         </div>
-                        <p className="text-[11px] text-slate-500 pl-8">
-                          Unduh berkas cadangan format JSON untuk disimpan di Google Drive sekolah atau penyimpanan lokal komputer/ponsel.
-                        </p>
-                      </div>
-
-                      <div className="pl-8 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                         <button
                           type="button"
-                          onClick={handleExportBackup}
-                          className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer shrink-0"
+                          onClick={() => loginForDriveList()}
+                          disabled={isFetchingDriveHistory}
+                          className="px-4 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-xl text-[11px] font-extrabold transition-all shadow-xs flex items-center gap-2 disabled:opacity-50 shrink-0"
                         >
-                          <Download size={16} /> Unduh Berkas (.json) untuk Google Drive
+                          <Database size={14} className={isFetchingDriveHistory ? "animate-bounce" : ""} />
+                          {isFetchingDriveHistory ? "Memuat..." : "Ambil Data Drive"}
                         </button>
-
-                        <a
-                          href="https://drive.google.com"
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
-                        >
-                          <Cloud size={16} className="text-blue-600" /> Buka Google Drive
-                        </a>
                       </div>
 
-                      <div className="pl-8 text-[11px] text-slate-500 space-y-1 bg-indigo-50/50 p-3 rounded-2xl border border-indigo-100/60">
-                        <div className="font-bold text-indigo-950">Cara Simpan di Google Drive:</div>
-                        <ol className="list-decimal list-inside space-y-0.5 text-[10.5px]">
-                          <li>Klik <strong>Unduh Berkas (.json)</strong> di atas.</li>
-                          <li>Buka <strong>drive.google.com</strong> di peramban Anda.</li>
-                          <li>Seret (drag & drop) file JSON hasil unduhan ke folder Google Drive Anda untuk pengarsipan akhir hari.</li>
-                        </ol>
+                      <div className="pl-8">
+                        {driveBackupHistory.length === 0 ? (
+                          <div className="p-4 bg-slate-50 border border-dashed border-slate-200 rounded-2xl text-center text-[11px] text-slate-400 italic">
+                            {driveToken ? "Belum ada riwayat cadangan di Google Drive. Klik tombol Backup ke Google Drive di atas." : "Klik tombol 'Ambil Data Drive' di atas untuk melihat riwayat."}
+                          </div>
+                        ) : (
+                          <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                            {driveBackupHistory.map((item) => {
+                              const createdDate = new Date(item.createdTime);
+                              const formattedTime = createdDate.toLocaleString("id-ID", {
+                                day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit"
+                              });
+                              const sizeKB = Math.round(Number(item.size) / 1024);
+                              
+                              return (
+                                <div 
+                                  key={item.id}
+                                  className="p-3 bg-emerald-50/30 hover:bg-emerald-50/80 border border-emerald-100/60 rounded-2xl flex items-center justify-between gap-3 transition-colors"
+                                >
+                                  <div className="space-y-0.5">
+                                    <div className="font-extrabold text-xs text-emerald-950 flex items-center gap-2">
+                                      <Cloud size={14} className="text-emerald-600" />
+                                      <span>{formattedTime}</span>
+                                      <span className="px-2 py-0.2 rounded-md bg-emerald-100 text-emerald-700 text-[10px] font-bold">
+                                        {sizeKB} KB
+                                      </span>
+                                    </div>
+                                    <p className="text-[10px] text-emerald-700 truncate max-w-[200px] sm:max-w-full">
+                                      {item.name}
+                                    </p>
+                                  </div>
+                                  <button
+                                    onClick={() => setConfirmRestoreModal({
+                                      isOpen: true,
+                                      type: "drive",
+                                      driveItem: item,
+                                    })}
+                                    className="px-3 py-2 bg-white hover:bg-emerald-600 hover:text-white text-emerald-700 border border-emerald-200 rounded-xl text-[10px] font-extrabold transition-all flex items-center gap-1.5 shrink-0"
+                                  >
+                                    <RotateCcw size={12} /> Pulihkan
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -3062,14 +4828,31 @@ export default function App() {
                               className="p-3 bg-slate-50 hover:bg-indigo-50/40 border border-slate-200 rounded-2xl flex items-center justify-between gap-3 transition-colors"
                             >
                               <div className="space-y-0.5">
-                                <div className="font-extrabold text-xs text-indigo-950 flex items-center gap-2">
+                                <div className="font-extrabold text-xs text-indigo-950 flex flex-wrap items-center gap-2">
                                   <span>{item.formattedDate}</span>
+                                  {item.teacherName && (
+                                    <span className="px-2 py-0.2 rounded-md bg-purple-100 text-purple-700 text-[10px] font-bold">
+                                      👤 {item.teacherName}
+                                    </span>
+                                  )}
                                   <span className="px-2 py-0.2 rounded-md bg-indigo-100 text-indigo-700 text-[10px] font-bold">
                                     {item.deviceLabel}
                                   </span>
+                                  {item.sizeKB !== undefined && (
+                                    <span className="px-2 py-0.2 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                                      📦 {item.sizeKB >= 1024 ? `${(item.sizeKB / 1024).toFixed(2)} MB` : `${item.sizeKB} KB`}
+                                    </span>
+                                  )}
+                                  {item.isChunked && (
+                                    <span className="px-2 py-0.2 rounded-md bg-sky-100 text-sky-800 text-[10px] font-bold">
+                                      🧩 Multi-Chunk
+                                    </span>
+                                  )}
                                 </div>
-                                <div className="text-[10px] text-slate-500 flex items-center gap-3">
+                                <div className="text-[10px] text-slate-500 flex flex-wrap items-center gap-x-3 gap-y-1">
                                   <span>👤 {item.studentCount} Siswa</span>
+                                  <span>📅 {item.attendanceCount ?? 0} Absensi</span>
+                                  <span>🛡️ {(item.homeroomCount ?? 0) + (item.homeVisitsCount ?? 0)} Wali Kelas</span>
                                   <span>📊 {item.gradeCount} Nilai</span>
                                   <span>📖 {item.journalCount} Jurnal</span>
                                   <span>🏫 {item.classCount} Kelas</span>
@@ -3078,7 +4861,7 @@ export default function App() {
 
                               <button
                                 type="button"
-                                onClick={() => handleRestoreDailyBackupFromCloud(item)}
+                                onClick={() => handleOpenCloudRestoreConfirm(item)}
                                 className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[11px] font-bold transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer shrink-0"
                               >
                                 <RotateCcw size={12} /> Pulihkan (Restore)
@@ -3091,28 +4874,50 @@ export default function App() {
 
                     {/* SECTION 4: Import Restore from File (.json) */}
                     <div className="p-5 bg-white border border-slate-200 rounded-3xl space-y-3 shadow-xs">
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="w-6 h-6 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center font-bold text-xs">4</span>
-                          <h5 className="text-xs font-extrabold text-slate-900">Pulihkan Data dari Berkas File (.json)</h5>
-                        </div>
-                        <p className="text-[11px] text-slate-500 pl-8">Muat kembali data dari berkas cadangan JSON yang diunduh sebelumnya atau dari Google Drive Anda.</p>
-                      </div>
-                      <label className="border-2 border-dashed border-slate-300 hover:border-indigo-500 bg-slate-50 hover:bg-indigo-50/30 transition-all rounded-2xl p-5 flex flex-col items-center justify-center gap-2 cursor-pointer text-center group">
-                        <div className="w-10 h-10 rounded-xl bg-white shadow-xs flex items-center justify-center text-indigo-600 group-hover:scale-110 transition-transform">
-                          <FileUp size={20} />
-                        </div>
+                      <div className="flex items-center justify-between">
                         <div>
-                          <span className="text-xs font-bold text-slate-700 block">Klik untuk pilih berkas cadangan (.json)</span>
-                          <span className="text-[10px] text-slate-400">Pilih file .json cadangan EduAsisten Anda</span>
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="w-6 h-6 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center font-bold text-xs">4</span>
+                            <h5 className="text-xs font-extrabold text-slate-900">Simpan & Pulihkan Data Berkas Lokal (.json)</h5>
+                          </div>
+                          <p className="text-[11px] text-slate-500 pl-8">Unduh cadangan ke file lokal, atau muat kembali dari berkas cadangan JSON yang Anda miliki.</p>
                         </div>
-                        <input 
-                          type="file"
-                          accept=".json"
-                          onChange={handleImportBackup}
-                          className="hidden"
-                        />
-                      </label>
+                        <button
+                          type="button"
+                          onClick={handleExportBackup}
+                          className="px-4 py-2.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-xl text-xs font-extrabold transition-all flex items-center gap-2 cursor-pointer shrink-0"
+                        >
+                          <Download size={16} /> Simpan Berkas (.json)
+                        </button>
+                      </div>
+
+                      <div 
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const file = e.dataTransfer.files?.[0];
+                          if (file) handleProcessImportFile(file);
+                        }}
+                        className="border-2 border-dashed border-slate-300 hover:border-indigo-500 bg-slate-50 hover:bg-indigo-50/30 transition-all rounded-2xl p-5 flex flex-col items-center justify-center gap-2 text-center group cursor-pointer"
+                      >
+                        <label className="w-full flex flex-col items-center justify-center cursor-pointer">
+                          <div className="w-10 h-10 rounded-xl bg-white shadow-xs flex items-center justify-center text-indigo-600 group-hover:scale-110 transition-transform mb-1">
+                            <FileUp size={20} />
+                          </div>
+                          <span className="text-xs font-bold text-slate-700 block">Klik untuk pilih atau Seret (Drag & Drop) berkas (.json)</span>
+                          <span className="text-[10px] text-slate-400">Pilih file .json cadangan EduAsisten Anda</span>
+                          <input 
+                            type="file"
+                            accept=".json"
+                            onChange={handleImportBackup}
+                            className="hidden"
+                          />
+                        </label>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -3302,6 +5107,153 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* RESTORE DATA CONFIRMATION MODAL */}
+      <AnimatePresence>
+        {confirmRestoreModal && confirmRestoreModal.isOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-white rounded-3xl p-6 max-w-lg w-full shadow-2xl border border-slate-100 space-y-5"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                    <RotateCcw size={20} className={isRestoringData ? "animate-spin" : ""} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-extrabold text-slate-900">Konfirmasi Pemulihan Data (Restore)</h3>
+                    <p className="text-[11px] text-slate-500">
+                      {confirmRestoreModal.type === "cloud" 
+                        ? `Sumber: Snapshot Cloud (${confirmRestoreModal.backupItem?.formattedDate})`
+                        : confirmRestoreModal.type === "drive"
+                        ? `Sumber: Google Drive (${confirmRestoreModal.driveItem?.name})`
+                        : `Sumber: File Berkas (${confirmRestoreModal.fileName || "JSON"})`
+                      }
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => !isRestoringData && setConfirmRestoreModal(null)}
+                  disabled={isRestoringData}
+                  className="p-1 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-colors disabled:opacity-30 cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Error Alert if any */}
+              {restoreErrorMsg && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs font-bold flex items-start gap-2 animate-in fade-in">
+                  <AlertCircle size={16} className="text-rose-600 shrink-0 mt-0.5" />
+                  <span>{restoreErrorMsg}</span>
+                </div>
+              )}
+
+              {/* Summary Stats of Backup */}
+              {confirmRestoreModal.type === "drive" ? (
+                <div className="p-4 bg-slate-50 border border-slate-200/80 rounded-2xl text-center text-[11px] text-slate-500 italic">
+                  Data ringkasan tidak tersedia sebelum pengunduhan selesai. Seluruh data akan dipulihkan secara penuh dari Google Drive.
+                </div>
+              ) : (
+                <div className="p-4 bg-slate-50 border border-slate-200/80 rounded-2xl space-y-2.5">
+                  <div className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                    Ringkasan Data yang Akan Dimuat:
+                  </div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="p-2.5 bg-white border border-slate-200/60 rounded-xl flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">👤 Jumlah Siswa:</span>
+                    <strong className="text-indigo-950 font-extrabold">{confirmRestoreModal.details?.studentCount || 0}</strong>
+                  </div>
+                  <div className="p-2.5 bg-white border border-slate-200/60 rounded-xl flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">📅 Rekap Absensi:</span>
+                    <strong className="text-indigo-950 font-extrabold">{confirmRestoreModal.details?.attendanceCount || 0}</strong>
+                  </div>
+                  <div className="p-2.5 bg-white border border-slate-200/60 rounded-xl flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">🛡️ Wali Kelas:</span>
+                    <strong className="text-indigo-950 font-extrabold">
+                      {(confirmRestoreModal.details?.homeroomCount || 0) + (confirmRestoreModal.details?.homeVisitsCount || 0)} Kegiatan
+                    </strong>
+                  </div>
+                  <div className="p-2.5 bg-white border border-slate-200/60 rounded-xl flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">📊 Jumlah Nilai:</span>
+                    <strong className="text-indigo-950 font-extrabold">{confirmRestoreModal.details?.gradeCount || 0}</strong>
+                  </div>
+                  <div className="p-2.5 bg-white border border-slate-200/60 rounded-xl flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">📖 Jurnal Guru:</span>
+                    <strong className="text-indigo-950 font-extrabold">{confirmRestoreModal.details?.journalCount || 0}</strong>
+                  </div>
+                  <div className="p-2.5 bg-white border border-slate-200/60 rounded-xl flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">🏫 Kelas:</span>
+                    <strong className="text-indigo-950 font-extrabold">{confirmRestoreModal.details?.classCount || 0}</strong>
+                  </div>
+                  {(confirmRestoreModal.details?.scheduleCount || 0) > 0 && (
+                    <div className="p-2.5 bg-white border border-slate-200/60 rounded-xl flex items-center justify-between">
+                      <span className="text-slate-500 font-medium">🗓️ Jadwal Pelajaran:</span>
+                      <strong className="text-indigo-950 font-extrabold">{confirmRestoreModal.details?.scheduleCount || 0}</strong>
+                    </div>
+                  )}
+                  {(confirmRestoreModal.details?.assignmentCount || 0) > 0 && (
+                    <div className="p-2.5 bg-white border border-slate-200/60 rounded-xl flex items-center justify-between">
+                      <span className="text-slate-500 font-medium">📝 Tugas & Ulangan:</span>
+                      <strong className="text-indigo-950 font-extrabold">{confirmRestoreModal.details?.assignmentCount || 0}</strong>
+                    </div>
+                  )}
+                </div>
+                {confirmRestoreModal.details?.teacherName && (
+                  <div className="text-[11px] text-slate-600 pt-1 border-t border-slate-200/50 flex items-center justify-between">
+                    <span>Profil Pengajar & Sekolah:</span>
+                    <span className="font-bold text-slate-800">{confirmRestoreModal.details.teacherName}</span>
+                  </div>
+                )}
+              </div>
+              )}
+
+              {/* Warning Notice */}
+              <div className="p-3 bg-amber-50 border border-amber-200/70 rounded-2xl text-[11px] text-amber-900 flex items-start gap-2.5">
+                <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Perhatian:</strong> Memulihkan data akan menggantikan data aktif di aplikasi saat ini dengan data dari cadangan yang dipilih dan otomatis menyinkronkannya kembali ke database Cloud.
+                </span>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmRestoreModal(null)}
+                  disabled={isRestoringData}
+                  className="px-4 py-2.5 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-bold transition-all cursor-pointer disabled:opacity-40"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExecuteRestore}
+                  disabled={isRestoringData}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-md flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isRestoringData ? (
+                    <>
+                      <RotateCcw size={14} className="animate-spin" />
+                      <span>Sedang Memulihkan...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 size={14} />
+                      <span>Ya, Pulihkan Sekarang</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* FIRESTORE REALTIME CLOUD SYNC MODAL */}
       <CloudSyncModal
         isOpen={isCloudSyncModalOpen}
@@ -3309,7 +5261,7 @@ export default function App() {
         syncKey={syncKey}
         onUpdateSyncKey={(newKey) => setSyncKey(newKey)}
         isRealtimeSyncEnabled={isRealtimeSyncEnabled}
-        onToggleRealtimeSync={(enabled) => setIsRealtimeSyncEnabled(enabled)}
+        onToggleRealtimeSync={handleToggleRealtimeSync}
         onManualPush={() => pushDataToCloud(true)}
         onManualPull={handleManualPull}
         realtimeSyncStatus={realtimeSyncStatus}
@@ -3331,6 +5283,21 @@ export default function App() {
         }}
       />
 
+      {/* INITIAL STARTUP PRE-SYNC FLOATING INDICATOR */}
+      <AnimatePresence>
+        {isInitialSyncing && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.95 }}
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-slate-900/95 text-white px-4 py-2.5 rounded-2xl shadow-2xl border border-indigo-500/40 flex items-center gap-2.5 backdrop-blur-md text-xs font-bold pointer-events-none"
+          >
+            <RefreshCw size={15} className="animate-spin text-indigo-400 shrink-0" />
+            <span className="text-slate-200 text-xs">Menyinkronkan data dengan perangkat terakhir...</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* REALTIME MULTI-DEVICE FLOATING TOAST NOTIFICATION */}
       <AnimatePresence>
         {cloudSyncNotice && (
@@ -3344,9 +5311,9 @@ export default function App() {
               <Cloud size={18} className="animate-pulse text-emerald-400" />
             </div>
             <div>
-              <div className="text-emerald-300 font-extrabold text-[11px] flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                Sinkronisasi Firestore Realtime
+              <div className="text-indigo-300 font-extrabold text-[11px] flex items-center gap-1.5">
+                <Cloud size={12} className="text-indigo-400" />
+                Notifikasi Sinkronisasi Cloud
               </div>
               <div className="text-slate-200 text-xs font-medium">{cloudSyncNotice.message}</div>
             </div>
@@ -3361,6 +5328,21 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* STUDENT PROFILE & SETTINGS MODAL */}
+      {isStudent && user && (
+        <PengaturanSiswaModal
+          isOpen={isStudentSettingsOpen}
+          onClose={() => setIsStudentSettingsOpen(false)}
+          user={user}
+          classList={classList}
+          onProfileUpdated={(updatedUser) => {
+            setUser((prev) => (prev ? { ...prev, ...updatedUser } : null));
+          }}
+        />
+      )}
+
     </div>
+      )}
+    </>
   );
 }

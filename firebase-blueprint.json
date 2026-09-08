@@ -1,100 +1,14 @@
 {
-  "entities": {
-    "guruData": {
-      "title": "GuruData",
-      "description": "Data administrasi guru lengkap yang disinkronkan secara realtime antar perangkat (Laptop dan HP)",
-      "type": "object",
-      "properties": {
-        "syncId": {
-          "type": "string",
-          "description": "ID unik sinkronisasi antar perangkat"
-        },
-        "teacherName": {
-          "type": "string",
-          "description": "Nama lengkap guru"
-        },
-        "nip": {
-          "type": "string",
-          "description": "NIP guru"
-        },
-        "subject": {
-          "type": "string",
-          "description": "Mata pelajaran"
-        },
-        "institution": {
-          "type": "string",
-          "description": "Instansi/Sekolah"
-        },
-        "currentMonth": {
-          "type": "string",
-          "description": "Bulan aktif"
-        },
-        "currentWeek": {
-          "type": "string",
-          "description": "Minggu aktif"
-        },
-        "profilePhoto": {
-          "type": "string",
-          "description": "URL atau data foto profil"
-        },
-        "homeroomClass": {
-          "type": "string",
-          "description": "Kelas wali"
-        },
-        "students": {
-          "type": "array",
-          "description": "Daftar data siswa per kelas"
-        },
-        "attendanceList": {
-          "type": "array",
-          "description": "Rekap absensi siswa"
-        },
-        "grades": {
-          "type": "array",
-          "description": "Daftar nilai tugas dan ujian siswa"
-        },
-        "schedule": {
-          "type": "array",
-          "description": "Jadwal mengajar guru"
-        },
-        "assignments": {
-          "type": "array",
-          "description": "Daftar tugas pembelajaran"
-        },
-        "submissions": {
-          "type": "array",
-          "description": "Pengumpulan tugas siswa"
-        },
-        "journals": {
-          "type": "array",
-          "description": "Jurnal harian mengajar"
-        },
-        "homeroomNotes": {
-          "type": "array",
-          "description": "Catatan bimbingan wali kelas"
-        },
-        "homeVisits": {
-          "type": "array",
-          "description": "Laporan home visit wali kelas"
-        },
-        "lastUpdated": {
-          "type": "number",
-          "description": "Timestamp pembaruan terakhir (epoch ms)"
-        },
-        "updatedBy": {
-          "type": "string",
-          "description": "Nama perangkat atau penanda pengubah (HP / Laptop)"
-        }
+  "users": {
+    "$uid": {
+      "fields": {
+        "email": "string",
+        "name": "string",
+        "role": "string",
+        "photoURL": "string",
+        "createdAt": "timestamp"
       },
-      "required": ["syncId", "lastUpdated"]
-    }
-  },
-  "firestore": {
-    "/guru_data/{syncId}": {
-      "schema": {
-        "$ref": "#/entities/guruData"
-      },
-      "description": "Dokumen data utama administrasi guru untuk sinkronisasi realtime lintas perangkat"
+      "indexes": []
     }
   }
 }

@@ -7,6 +7,7 @@ import {
   FileText, 
   Sparkles, 
   CheckCircle, 
+  CheckCircle2,
   User, 
   Users,
   Copy, 
@@ -31,11 +32,21 @@ import {
   Edit3,
   ChevronDown,
   ChevronUp,
-  Camera
+  Camera,
+  Plus,
+  History,
+  Save,
+  RotateCcw,
+  Filter,
+  Clock,
+
+  BookOpen
 } from "lucide-react";
-import { Student, Assignment, Submission } from "../types";
+import { Student, Assignment, Submission, StudentGrade } from "../types";
 import { CLASSES } from "../data/presets";
 import * as XLSX from "xlsx";
+import CameraCaptureModal from "./CameraCaptureModal";
+import { compressFileForOCR } from "../lib/imageUtils";
 
 export interface BatchGradingResult {
   studentId: string;
@@ -61,6 +72,7 @@ interface PenilaianProps {
   students: Student[];
   assignments: Assignment[];
   submissions: Submission[];
+  grades?: StudentGrade[];
   onApplyGrade: (assignmentId: string, studentId: string, score: number, aiAnalysis?: any) => void;
   onApplyBatchGrades?: (
     assignmentId: string,
@@ -69,6 +81,12 @@ interface PenilaianProps {
     newAssignmentTitle?: string,
     targetClass?: string
   ) => void;
+  onCreateAssignment?: (
+    title: string,
+    targetClass: string,
+    category?: 'Tugas' | 'Ulangan Harian' | 'Proyek' | 'Kuis' | 'Lainnya',
+    maxScore?: number
+  ) => string;
   onNavigateToGradebook?: (className?: string) => void;
   classList?: string[];
   onGradingStateChange?: (isGrading: boolean, progressText: string) => void;
@@ -78,8 +96,10 @@ export default function Penilaian({
   students,
   assignments,
   submissions,
+  grades = [],
   onApplyGrade,
   onApplyBatchGrades,
+  onCreateAssignment,
   onNavigateToGradebook,
   classList,
   onGradingStateChange
@@ -123,6 +143,8 @@ export default function Penilaian({
   const [activeStudentId, setActiveStudentId] = useState("");
   const [activeStudentName, setActiveStudentName] = useState("");
   const [editableScore, setEditableScore] = useState<string>("");
+  const [singleRevisionNote, setSingleRevisionNote] = useState<string>("");
+  const [showSavedAnalysisDetails, setShowSavedAnalysisDetails] = useState<boolean>(false);
   const [singleResult, setSingleResult] = useState<BatchGradingResult | null>(null);
 
   // Batch Mode Specific States
@@ -136,6 +158,10 @@ export default function Penilaian({
   const [batchUploadedFiles, setBatchUploadedFiles] = useState<Array<{ studentId: string; studentName: string; file: File; base64: string; mimeType: string }>>([]);
   const [quickTextContent, setQuickTextContent] = useState("");
   const [selectedStudentsForBatch, setSelectedStudentsForBatch] = useState<string[]>([]);
+  const [batchStudentFilter, setBatchStudentFilter] = useState<"all" | "graded" | "ungraded">("all");
+  const [expandedRevisionStudentId, setExpandedRevisionStudentId] = useState<string | null>(null);
+  const [inlineAnswerEdits, setInlineAnswerEdits] = useState<Record<string, string>>({});
+  const [inlineScoreEdits, setInlineScoreEdits] = useState<Record<string, string>>({});
   
   // Batch Review States
   const [batchResults, setBatchResults] = useState<BatchGradingResult[]>([]);
@@ -151,9 +177,24 @@ export default function Penilaian({
   const [editedItems, setEditedItems] = useState<Array<{ no: number; type: string; studentAnswer: string; answerKey: string; status: string; score: number; maxScore: number; note: string }>>([]);
   const [editSuccessMsg, setEditSuccessMsg] = useState("");
 
-  // Per-Student Answer Sheet Files in Class List State
-  const [studentUploadedFiles, setStudentUploadedFiles] = useState<Record<string, { file: File; base64: string; mimeType: string; name: string }>>({});
+  // Quick Create Assignment Modal State
+  const [isCreatingAssignmentModal, setIsCreatingAssignmentModal] = useState(false);
+  const [newAssignTitle, setNewAssignTitle] = useState("");
+  const [newAssignCategory, setNewAssignCategory] = useState<'Tugas' | 'Ulangan Harian' | 'Proyek' | 'Kuis' | 'Lainnya'>('Ulangan Harian');
+  const [newAssignMaxScore, setNewAssignMaxScore] = useState<number>(100);
+
+  // Graded Students History & Revision Modal State
+  const [isGradedStudentsModalOpen, setIsGradedStudentsModalOpen] = useState(false);
+  const [modalStudentSearch, setModalStudentSearch] = useState("");
+  const [batchModalScores, setBatchModalScores] = useState<Record<string, string>>({});
+  const [batchModalAnswers, setBatchModalAnswers] = useState<Record<string, string>>({});
+  const [modalSaveSuccess, setModalSaveSuccess] = useState(false);
+
+  // Per-Student Answer Sheet Files in Class List State (supports up to 10 photos/files per student)
+  const [cameraTargetStudent, setCameraTargetStudent] = useState<{ id: string, name: string } | null>(null);
+  const [studentUploadedFiles, setStudentUploadedFiles] = useState<Record<string, Array<{ id: string; file?: File; base64: string; mimeType: string; name: string }>>>({});
   const [ocrLoadingStudentId, setOcrLoadingStudentId] = useState<string | null>(null);
+  const [previewPhotoModal, setPreviewPhotoModal] = useState<{ studentName: string; photos: Array<{ id: string; base64: string; mimeType: string; name: string }>; activeIndex: number } | null>(null);
 
   // Integration Target Configuration
   const [integrationTarget, setIntegrationTarget] = useState<"selected_assignment" | "new_assignment" | "midterm" | "exam">("selected_assignment");
@@ -262,26 +303,330 @@ export default function Penilaian({
     s => s.assignmentId === selectedAssignmentId
   );
 
-  // Single Submission Selection Handler
+  // Statistics and Graded List for Selected Assignment & Class
+  const assignmentStats = useMemo(() => {
+    const currentAssign = assignments.find(a => a.id === selectedAssignmentId);
+    const studentCount = classStudents.length;
+    
+    const gradedList = classStudents.map(st => {
+      const sub = submissions.find(s => s.assignmentId === selectedAssignmentId && s.studentId === st.id);
+      const gRow = grades.find(g => g.studentId === st.id);
+      const gScore = gRow?.assignmentScores?.[selectedAssignmentId];
+      const finalScore = (sub && sub.score !== null && sub.score !== undefined) 
+        ? sub.score 
+        : (gScore !== undefined ? gScore : null);
+      
+      const hasAnswer = Boolean(sub?.studentAnswer || batchStudentAnswers[st.id]);
+      const savedAnswer = sub?.studentAnswer || batchStudentAnswers[st.id] || "";
+
+      return {
+        student: st,
+        submission: sub,
+        score: finalScore,
+        isGraded: finalScore !== null && finalScore !== undefined,
+        hasAnswer,
+        savedAnswer,
+        aiAnalysis: sub?.aiAnalysis
+      };
+    });
+
+    const submittedCount = gradedList.filter(item => item.hasAnswer).length;
+    const gradedCount = gradedList.filter(item => item.isGraded).length;
+    const unGradedCount = Math.max(0, studentCount - gradedCount);
+    const totalScoreSum = gradedList.reduce((acc, item) => acc + (item.isGraded ? (item.score || 0) : 0), 0);
+    const avgScore = gradedCount > 0 ? (totalScoreSum / gradedCount).toFixed(1) : "-";
+
+    return {
+      currentAssign,
+      studentCount,
+      submittedCount,
+      gradedCount,
+      unGradedCount,
+      avgScore,
+      gradedList
+    };
+  }, [assignments, selectedAssignmentId, submissions, classStudents, grades, batchStudentAnswers]);
+
+  // Active Student Existing Grading & Submission Data
+  const activeStudentExistingData = useMemo(() => {
+    if (!activeStudentId) return null;
+    const st = students.find(s => s.id === activeStudentId);
+    const sub = submissions.find(s => s.assignmentId === selectedAssignmentId && s.studentId === activeStudentId);
+    const gRow = grades.find(g => g.studentId === activeStudentId);
+    const gScore = gRow?.assignmentScores?.[selectedAssignmentId];
+    const finalScore = (sub && sub.score !== null && sub.score !== undefined) 
+      ? sub.score 
+      : (gScore !== undefined ? gScore : null);
+    
+    return {
+      student: st,
+      submission: sub,
+      score: finalScore,
+      isGraded: finalScore !== null && finalScore !== undefined,
+      aiAnalysis: sub?.aiAnalysis,
+      savedAnswer: sub?.studentAnswer || batchStudentAnswers[activeStudentId] || ""
+    };
+  }, [activeStudentId, selectedAssignmentId, submissions, grades, students, batchStudentAnswers]);
+
+  // Single Student Selection Handler
+  const handleStudentSelection = (studentId: string) => {
+    setActiveStudentId(studentId);
+    if (!studentId || studentId === "custom") {
+      setSelectedSubmissionId("");
+      setStudentName("");
+      setActiveStudentName("");
+      setStudentAnswer("");
+      setEditableScore("");
+      setSingleResult(null);
+      setSingleRevisionNote("");
+      return;
+    }
+
+    const st = students.find(s => s.id === studentId);
+    const sub = submissions.find(s => s.assignmentId === selectedAssignmentId && s.studentId === studentId);
+    const gRow = grades.find(g => g.studentId === studentId);
+    const gScore = gRow?.assignmentScores?.[selectedAssignmentId];
+    const finalScore = (sub && sub.score !== null && sub.score !== undefined) 
+      ? sub.score 
+      : (gScore !== undefined ? gScore : null);
+
+    if (st) {
+      setStudentName(st.name);
+      setActiveStudentName(st.name);
+      setSelectedSubmissionId(sub ? sub.id : `student-${st.id}`);
+
+      // Set answer from restored submission or existing batch state
+      if (sub && sub.studentAnswer) {
+        setStudentAnswer(sub.studentAnswer);
+      } else if (batchStudentAnswers[st.id]) {
+        setStudentAnswer(batchStudentAnswers[st.id]);
+      } else {
+        setStudentAnswer("1. A, 2. C, 3. B, 4. D, 5. E\nPG Kompleks: 1. A, C, D\nBenar/Salah: 1. Benar, 2. Salah\nIsian: 1. Inflasi\nUraian: Menurut saya, hukum permintaan adalah jika harga naik maka jumlah barang diminta berkurang.");
+      }
+
+      // Preload existing score if available
+      if (finalScore !== null && finalScore !== undefined) {
+        setEditableScore(String(finalScore));
+        if (sub?.aiAnalysis) {
+          setSingleResult({
+            studentId: st.id,
+            studentName: st.name,
+            totalScore: finalScore,
+            maxScore: 100,
+            grade: finalScore >= 90 ? "A" : finalScore >= 80 ? "B" : finalScore >= 75 ? "C" : finalScore >= 60 ? "D" : "E",
+            status: finalScore >= 75 ? "Tuntas" : "Remidial",
+            summaryPerType: sub.aiAnalysis.summaryPerType || [],
+            items: sub.aiAnalysis.items || [],
+            analysis: sub.aiAnalysis.analysis || "Analisis AI tersimpan dari tugas/ulangan.",
+            feedback: sub.aiAnalysis.feedback || "Umpan balik tersimpan.",
+            suggestions: sub.aiAnalysis.suggestions || "Saran perbaikan tersimpan."
+          });
+        } else {
+          setSingleResult({
+            studentId: st.id,
+            studentName: st.name,
+            totalScore: finalScore,
+            maxScore: 100,
+            grade: finalScore >= 90 ? "A" : finalScore >= 80 ? "B" : finalScore >= 75 ? "C" : finalScore >= 60 ? "D" : "E",
+            status: finalScore >= 75 ? "Tuntas" : "Remidial",
+            summaryPerType: [],
+            items: [],
+            analysis: "Nilai telah tersimpan di Buku Nilai.",
+            feedback: "Hasil evaluasi sebelumnya.",
+            suggestions: "Pertahankan dan tingkatkan prestasi."
+          });
+        }
+      } else {
+        setEditableScore("");
+        setSingleResult(null);
+      }
+    }
+  };
+
+  // Direct Save Manual Revision in Single Mode
+  const handleSaveSingleManualRevision = () => {
+    if (!activeStudentId || !selectedAssignmentId) {
+      alert("Pilih siswa dan tugas/ulangan terlebih dahulu.");
+      return;
+    }
+    const parsedScore = parseFloat(editableScore);
+    if (isNaN(parsedScore) || parsedScore < 0 || parsedScore > 100) {
+      alert("Masukkan nilai angka yang valid antara 0 - 100.");
+      return;
+    }
+
+    const aiAnalysisPayload = singleResult ? {
+      ...singleResult,
+      totalScore: parsedScore,
+      grade: parsedScore >= 90 ? "A" : parsedScore >= 80 ? "B" : parsedScore >= 75 ? "C" : parsedScore >= 60 ? "D" : "E",
+      status: parsedScore >= 75 ? "Tuntas" : "Remidial",
+      feedback: singleRevisionNote ? `${singleRevisionNote} (Direvisi oleh guru)` : singleResult.feedback
+    } : {
+      totalScore: parsedScore,
+      grade: parsedScore >= 90 ? "A" : parsedScore >= 80 ? "B" : parsedScore >= 75 ? "C" : parsedScore >= 60 ? "D" : "E",
+      status: parsedScore >= 75 ? "Tuntas" : "Remidial",
+      analysis: "Nilai dan jawaban direvisi langsung oleh Guru.",
+      feedback: singleRevisionNote || "Nilai telah disesuaikan oleh guru.",
+      suggestions: "Pertahankan dan tingkatkan pemahaman materi."
+    };
+
+    // Save to global state via onApplyGrade
+    onApplyGrade(selectedAssignmentId, activeStudentId, parsedScore, aiAnalysisPayload);
+
+    // Update local batch answers & reviewed scores for consistency
+    setBatchStudentAnswers(prev => ({ ...prev, [activeStudentId]: studentAnswer }));
+    setReviewedScores(prev => ({ ...prev, [activeStudentId]: parsedScore }));
+
+    setApplySuccess(true);
+    setTimeout(() => setApplySuccess(false), 3500);
+  };
+
+  // Sync All Restored Data from Submissions & Grades
+  const handleSyncFromRestoredData = () => {
+    const newAnswers: Record<string, string> = { ...batchStudentAnswers };
+    const newScores: Record<string, number> = { ...reviewedScores };
+    let syncedAnswerCount = 0;
+    let syncedScoreCount = 0;
+
+    classStudents.forEach(st => {
+      const sub = submissions.find(s => s.assignmentId === selectedAssignmentId && s.studentId === st.id);
+      const gRow = grades.find(g => g.studentId === st.id);
+      const gScore = gRow?.assignmentScores?.[selectedAssignmentId];
+      
+      if (sub && sub.studentAnswer) {
+        newAnswers[st.id] = sub.studentAnswer;
+        syncedAnswerCount++;
+      }
+      if (sub && sub.score !== null && sub.score !== undefined) {
+        newScores[st.id] = sub.score;
+        syncedScoreCount++;
+      } else if (gScore !== undefined && gScore !== null) {
+        newScores[st.id] = gScore;
+        syncedScoreCount++;
+      }
+    });
+
+    setBatchStudentAnswers(newAnswers);
+    setReviewedScores(newScores);
+
+    // If active student is selected, reload their data
+    if (activeStudentId) {
+      handleStudentSelection(activeStudentId);
+    }
+
+    alert(`Sinkronisasi Selesai!\n• ${syncedAnswerCount} jawaban siswa berhasil dimuat dari data cadangan.\n• ${syncedScoreCount} nilai siswa berhasil disinkronkan dengan Buku Nilai.`);
+  };
+
+  // Quick Create Assignment Handler
+  const handleQuickCreateSubmit = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newAssignTitle.trim()) {
+      alert("Masukkan judul tugas atau ulangan.");
+      return;
+    }
+
+    if (onCreateAssignment) {
+      const createdId = onCreateAssignment(newAssignTitle.trim(), selectedClass, newAssignCategory, newAssignMaxScore);
+      setSelectedAssignmentId(createdId);
+      setSubject(newAssignTitle.trim());
+      setIsCreatingAssignmentModal(false);
+      setNewAssignTitle("");
+      alert(`Tugas/Ulangan "${newAssignTitle}" untuk kelas ${selectedClass} berhasil dibuat dan dihubungkan!`);
+    } else {
+      setIsCreatingAssignmentModal(false);
+    }
+  };
+
+  // Save Inline Student Revision in Batch Mode
+  const handleSaveInlineStudentRevision = (studentId: string) => {
+    const customAnswer = inlineAnswerEdits[studentId] ?? batchStudentAnswers[studentId] ?? "";
+    const customScoreStr = inlineScoreEdits[studentId] ?? String(reviewedScores[studentId] ?? "");
+    const parsedScore = parseFloat(customScoreStr);
+    
+    if (isNaN(parsedScore) || parsedScore < 0 || parsedScore > 100) {
+      alert("Masukkan nilai angka yang valid (0-100).");
+      return;
+    }
+
+    // Update local state
+    setBatchStudentAnswers(prev => ({ ...prev, [studentId]: customAnswer }));
+    setReviewedScores(prev => ({ ...prev, [studentId]: parsedScore }));
+
+    // Apply directly to parent state
+    if (selectedAssignmentId) {
+      onApplyGrade(selectedAssignmentId, studentId, parsedScore, {
+        totalScore: parsedScore,
+        grade: parsedScore >= 90 ? "A" : parsedScore >= 80 ? "B" : parsedScore >= 75 ? "C" : parsedScore >= 60 ? "D" : "E",
+        status: parsedScore >= 75 ? "Tuntas" : "Remidial",
+        analysis: "Direvisi langsung oleh guru melalui daftar kelas.",
+        feedback: "Jawaban dan nilai telah diperbarui oleh guru.",
+        suggestions: "Tingkatkan pemahaman materi secara konsisten."
+      });
+    }
+
+    setExpandedRevisionStudentId(null);
+  };
+
+  // Open Graded Students Modal
+  const handleOpenGradedStudentsModal = () => {
+    const initialModalScores: Record<string, string> = {};
+    const initialModalAnswers: Record<string, string> = {};
+    
+    assignmentStats.gradedList.forEach(item => {
+      initialModalScores[item.student.id] = item.score !== null ? String(item.score) : (reviewedScores[item.student.id] !== undefined ? String(reviewedScores[item.student.id]) : "");
+      initialModalAnswers[item.student.id] = item.savedAnswer;
+    });
+
+    setBatchModalScores(initialModalScores);
+    setBatchModalAnswers(initialModalAnswers);
+    setIsGradedStudentsModalOpen(true);
+  };
+
+  // Save All Modal Revisions
+  const handleSaveAllModalRevisions = () => {
+    if (!selectedAssignmentId) return;
+
+    let updatedCount = 0;
+    assignmentStats.gradedList.forEach(item => {
+      const scoreStr = batchModalScores[item.student.id];
+      const answerStr = batchModalAnswers[item.student.id];
+      const scoreNum = parseFloat(scoreStr);
+
+      if (!isNaN(scoreNum) && scoreNum >= 0 && scoreNum <= 100) {
+        onApplyGrade(selectedAssignmentId, item.student.id, scoreNum, {
+          totalScore: scoreNum,
+          grade: scoreNum >= 90 ? "A" : scoreNum >= 80 ? "B" : scoreNum >= 75 ? "C" : scoreNum >= 60 ? "D" : "E",
+          status: scoreNum >= 75 ? "Tuntas" : "Remidial",
+          analysis: "Direvisi melalui Menu Revisi Massal Siswa.",
+          feedback: "Nilai dan jawaban telah disesuaikan oleh guru.",
+          suggestions: "Pertahankan dan tingkatkan prestasi."
+        });
+
+        // Update local state
+        setBatchStudentAnswers(prev => ({ ...prev, [item.student.id]: answerStr }));
+        setReviewedScores(prev => ({ ...prev, [item.student.id]: scoreNum }));
+        updatedCount++;
+      }
+    });
+
+    setModalSaveSuccess(true);
+    setTimeout(() => {
+      setModalSaveSuccess(false);
+      setIsGradedStudentsModalOpen(false);
+    }, 1500);
+  };
+
+  // Legacy compatibility handler
   const handleSubmissionSelect = (subId: string) => {
     setSelectedSubmissionId(subId);
     if (subId === "custom" || !subId) {
-      setStudentAnswer("");
-      setActiveStudentId("");
-      setActiveStudentName("");
-      setSingleResult(null);
+      handleStudentSelection("");
       return;
     }
 
     const sub = submissions.find(s => s.id === subId);
-    const assign = assignments.find(a => a.id === selectedAssignmentId);
-    
-    if (sub && assign) {
-      setSubject(assign.title || "Ekonomi");
-      setStudentName(sub.studentName);
-      setStudentAnswer(sub.studentAnswer || "1. A, 2. C, 3. B, 4. D, 5. E");
-      setActiveStudentId(sub.studentId);
-      setActiveStudentName(sub.studentName);
+    if (sub) {
+      handleStudentSelection(sub.studentId);
     }
   };
 
@@ -326,7 +671,7 @@ export default function Penilaian({
   };
 
   // Single Bundle PDF / Image Upload containing multiple students' sheets
-  const handleBundlePdfUpload = (e: ChangeEvent<HTMLInputElement>) => {
+  const handleBundlePdfUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -350,23 +695,24 @@ export default function Penilaian({
     setDetectedSheetCount(null);
     setBundleSummary("");
 
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setBundlePdfBase64(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      const base64 = await compressFileForOCR(file);
+      setBundlePdfBase64(base64);
+    } catch (err) {
+      console.error("Failed to process bundle file:", err);
+    }
   };
 
   // Multi-File Upload for Batch Mode (PDF / Image)
-  const handleMultiFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
+  const handleMultiFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
     const fileList = Array.from(files);
     const newBatchFiles: Array<{ studentId: string; studentName: string; file: File; base64: string; mimeType: string }> = [];
 
-    fileList.forEach((file, index) => {
-      // Try to match student by file name
+    for (let index = 0; index < fileList.length; index++) {
+      const file = fileList[index];
       const matchedStudent = classStudents.find(s => 
         file.name.toLowerCase().includes(s.name.toLowerCase()) || 
         (s.nis && file.name.toLowerCase().includes(s.nis))
@@ -383,22 +729,20 @@ export default function Penilaian({
         else mime = 'image/jpeg';
       }
 
-      const reader = new FileReader();
-      reader.onloadend = () => {
+      try {
+        const base64 = await compressFileForOCR(file);
         newBatchFiles.push({
           studentId: matchedStudent ? matchedStudent.id : `student-${index}`,
           studentName: matchedStudent ? matchedStudent.name : file.name.replace(/\.[^/.]+$/, ""),
           file,
-          base64: reader.result as string,
-          mimeType: mime
+          base64,
+          mimeType: mime.includes("image") ? "image/jpeg" : mime
         });
-
-        if (newBatchFiles.length === fileList.length) {
-          setBatchUploadedFiles(prev => [...prev, ...newBatchFiles]);
-        }
-      };
-      reader.readAsDataURL(file);
-    });
+      } catch (err) {
+        console.error("Failed compressing batch file:", err);
+      }
+    }
+    setBatchUploadedFiles(prev => [...prev, ...newBatchFiles]);
   };
 
   // Export Answer Key
@@ -578,34 +922,108 @@ export default function Penilaian({
     setEditedItems(r.items ? JSON.parse(JSON.stringify(r.items)) : []);
   };
 
-  // Upload Answer Sheet File for Individual Student in Class List
-  const handleStudentFileUpload = (studentId: string, studentName: string, e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Upload Answer Sheet File for Individual Student in Class List (Multi-photo support up to 10 photos)
+  
+  const handleCameraCapture = async (file: File) => {
+    if (!cameraTargetStudent) return;
+    const { id } = cameraTargetStudent;
+    
+    const existing = studentUploadedFiles[id] || [];
+    if (existing.length >= 10) {
+      alert("Maksimal 10 foto jawaban per siswa telah tercapai!");
+      setCameraTargetStudent(null);
+      return;
+    }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = reader.result as string;
+    try {
+      const base64 = await compressFileForOCR(file);
+      const newItem = {
+        id: `photo-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        file,
+        base64,
+        mimeType: "image/jpeg",
+        name: file.name || `foto_jawaban_${existing.length + 1}.jpg`
+      };
       setStudentUploadedFiles(prev => ({
         ...prev,
-        [studentId]: {
-          file,
-          base64,
-          mimeType: file.type || "application/pdf",
-          name: file.name
-        }
+        [id]: [...(prev[id] || []), newItem]
       }));
       // Auto-check this student in batch list if not already checked
+      setSelectedStudentsForBatch(prev => prev.includes(id) ? prev : [...prev, id]);
+      setCameraTargetStudent(null);
+    } catch (err) {
+      console.error("Camera capture compression error:", err);
+    }
+  };
+
+  const handleStudentFileUpload = async (studentId: string, studentName: string, e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const existing = studentUploadedFiles[studentId] || [];
+    const maxAllowed = 10 - existing.length;
+    if (maxAllowed <= 0) {
+      alert(`Siswa ${studentName} sudah memiliki 10 foto/berkas jawaban (maksimal).`);
+      e.target.value = "";
+      return;
+    }
+
+    const filesToProcess = files.slice(0, maxAllowed);
+    if (files.length > maxAllowed) {
+      alert(`Maksimal 10 foto per siswa. Hanya ${maxAllowed} foto pertama yang ditambahkan.`);
+    }
+
+    const newItems: Array<{ id: string; file: File; base64: string; mimeType: string; name: string }> = [];
+
+    for (let idx = 0; idx < filesToProcess.length; idx++) {
+      const file = filesToProcess[idx];
+      try {
+        const base64 = await compressFileForOCR(file);
+        const isPdf = file.type.includes("pdf") || file.name.toLowerCase().endsWith(".pdf");
+        newItems.push({
+          id: `file-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 7)}`,
+          file,
+          base64,
+          mimeType: isPdf ? "application/pdf" : "image/jpeg",
+          name: file.name
+        });
+      } catch (err) {
+        console.error("File upload compression error:", err);
+      }
+    }
+
+    if (newItems.length > 0) {
+      setStudentUploadedFiles(prev => ({
+        ...prev,
+        [studentId]: [...(prev[studentId] || []), ...newItems]
+      }));
       setSelectedStudentsForBatch(prev => prev.includes(studentId) ? prev : [...prev, studentId]);
-    };
-    reader.readAsDataURL(file);
+    }
     e.target.value = "";
   };
 
-  // Run instant AI OCR scan for uploaded student answer sheet
+  const handleRemoveStudentPhoto = (studentId: string, photoId?: string) => {
+    setStudentUploadedFiles(prev => {
+      const list = prev[studentId] || [];
+      if (!photoId) {
+        const next = { ...prev };
+        delete next[studentId];
+        return next;
+      }
+      const filtered = list.filter(p => p.id !== photoId);
+      if (filtered.length === 0) {
+        const next = { ...prev };
+        delete next[studentId];
+        return next;
+      }
+      return { ...prev, [studentId]: filtered };
+    });
+  };
+
+  // Run instant AI OCR scan for uploaded student answer sheet (supports multi-photo)
   const handleRunOCRForStudent = async (studentId: string, studentName: string) => {
-    const fileObj = studentUploadedFiles[studentId];
-    if (!fileObj) return;
+    const photos = studentUploadedFiles[studentId];
+    if (!photos || photos.length === 0) return;
 
     setOcrLoadingStudentId(studentId);
     try {
@@ -624,8 +1042,9 @@ export default function Penilaian({
             isianSingkat: kunciIsian,
             uraian: kunciUraian
           },
-          fileBase64: fileObj.base64,
-          fileMimeType: fileObj.mimeType,
+          fileBase64: photos[0].base64,
+          fileMimeType: photos[0].mimeType,
+          files: photos.map(p => ({ base64: p.base64, mimeType: p.mimeType })),
           questionTypes: selectedQuestionTypes,
           studentsRoster
         })
@@ -985,6 +1404,7 @@ export default function Penilaian({
       answerText?: string;
       fileBase64?: string;
       fileMimeType?: string;
+      files?: Array<{ base64?: string; mimeType?: string }>;
     }> = [];
 
     if (batchInputMethod === "class_list") {
@@ -995,13 +1415,15 @@ export default function Penilaian({
       }
 
       studentsToGrade = selected.map(s => {
-        const uploaded = studentUploadedFiles[s.id];
+        const photos = studentUploadedFiles[s.id] || [];
+        const hasFiles = photos.length > 0;
         return {
           studentId: s.id,
           studentName: s.name,
-          answerText: batchStudentAnswers[s.id] || (uploaded ? "Tersedia berkas lembar jawaban terunggah" : "Jawaban belum diisi"),
-          fileBase64: uploaded?.base64,
-          fileMimeType: uploaded?.mimeType
+          answerText: batchStudentAnswers[s.id] || (hasFiles ? `Tersedia ${photos.length} berkas foto lembar jawaban terunggah` : "Jawaban belum diisi"),
+          fileBase64: hasFiles ? photos[0].base64 : undefined,
+          fileMimeType: hasFiles ? photos[0].mimeType : undefined,
+          files: hasFiles ? photos.map(p => ({ base64: p.base64, mimeType: p.mimeType })) : undefined
         };
       });
     } else if (batchInputMethod === "multi_file") {
@@ -1406,9 +1828,19 @@ export default function Penilaian({
           
           {/* Class & Subject Selector */}
           <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-200 space-y-4">
-            <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
-              <User size={16} className="text-indigo-600" /> Data Kelas & Penugasan
-            </h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                <User size={16} className="text-indigo-600" /> Data Kelas & Penugasan
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsCreatingAssignmentModal(true)}
+                className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-[10px] font-extrabold flex items-center gap-1 transition-all cursor-pointer"
+                title="Buat Tugas / Ulangan Baru"
+              >
+                <Plus size={12} /> + Tugas Baru
+              </button>
+            </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
@@ -1436,25 +1868,105 @@ export default function Penilaian({
               </div>
             </div>
 
-            {/* Assignment Selection */}
-            {classAssignments.length > 0 && (
-              <div className="space-y-1 pt-1">
-                <label className="text-[10px] font-bold text-slate-500 uppercase">Hubungkan dengan Tugas / Ulangan</label>
-                <select
-                  value={selectedAssignmentId}
-                  onChange={(e) => {
-                    setSelectedAssignmentId(e.target.value);
-                    const found = assignments.find(a => a.id === e.target.value);
-                    if (found) setSubject(found.title);
-                  }}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+            {/* Assignment Selection & Connection */}
+            {classAssignments.length > 0 ? (
+              <div className="space-y-3 pt-1">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Hubungkan dengan Tugas / Ulangan
+                    </label>
+                    <span className="text-[9px] font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
+                      {classAssignments.length} Tugas Tersedia
+                    </span>
+                  </div>
+                  <select
+                    value={selectedAssignmentId}
+                    onChange={(e) => {
+                      setSelectedAssignmentId(e.target.value);
+                      const found = assignments.find(a => a.id === e.target.value);
+                      if (found) setSubject(found.title);
+                    }}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  >
+                    {classAssignments.map(assign => (
+                      <option key={assign.id} value={assign.id}>
+                        {assign.title} [{assign.category || "Ulangan Harian"}] - {assign.className}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Assignment & Restored Data Status Card */}
+                <div className="bg-slate-50/80 border border-slate-200 rounded-2xl p-3 space-y-2.5 text-xs">
+                  <div className="flex items-center justify-between border-b border-slate-200/60 pb-2">
+                    <div className="flex items-center gap-1.5 font-bold text-slate-800">
+                      <BookOpen size={14} className="text-indigo-600" />
+                      <span className="truncate max-w-[200px]">{assignmentStats.currentAssign?.title || "Penugasan Terpilih"}</span>
+                    </div>
+                    <span className="px-2 py-0.5 bg-indigo-100 text-indigo-800 rounded-md text-[10px] font-black">
+                      {assignmentStats.currentAssign?.category || "Ulangan Harian"}
+                    </span>
+                  </div>
+
+                  {/* 4 Stats Grid */}
+                  <div className="grid grid-cols-4 gap-2 text-center">
+                    <div className="bg-white p-1.5 rounded-xl border border-slate-100 shadow-2xs">
+                      <span className="text-[9px] text-slate-400 font-bold block">Total Siswa</span>
+                      <span className="font-black text-slate-800 text-xs">{assignmentStats.studentCount}</span>
+                    </div>
+                    <div className="bg-white p-1.5 rounded-xl border border-slate-100 shadow-2xs">
+                      <span className="text-[9px] text-slate-400 font-bold block">Ada Jawaban</span>
+                      <span className="font-black text-indigo-600 text-xs">{assignmentStats.submittedCount}</span>
+                    </div>
+                    <div className="bg-white p-1.5 rounded-xl border border-slate-100 shadow-2xs">
+                      <span className="text-[9px] text-slate-400 font-bold block">Dinilai</span>
+                      <span className="font-black text-emerald-600 text-xs">{assignmentStats.gradedCount}</span>
+                    </div>
+                    <div className="bg-white p-1.5 rounded-xl border border-slate-100 shadow-2xs">
+                      <span className="text-[9px] text-slate-400 font-bold block">Rata-Rata</span>
+                      <span className="font-black text-amber-600 text-xs">{assignmentStats.avgScore}</span>
+                    </div>
+                  </div>
+
+                  {/* Sync & Revision Action Buttons */}
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleSyncFromRestoredData}
+                      className="flex-1 px-2.5 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-xl text-[10px] font-extrabold flex items-center justify-center gap-1.5 transition-all shadow-2xs cursor-pointer"
+                      title="Muat ulang jawaban & nilai siswa dari data cadangan"
+                    >
+                      <RotateCcw size={12} className="text-indigo-600" />
+                      <span>Sinkronkan Cadangan</span>
+                    </button>
+                    {assignmentStats.gradedCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleOpenGradedStudentsModal}
+                        className="px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/60 rounded-xl text-[10px] font-extrabold flex items-center justify-center gap-1 transition-all cursor-pointer"
+                        title="Lihat dan revisi siswa yang sudah dinilai"
+                      >
+                        <History size={12} />
+                        <span>Revisi Nilai ({assignmentStats.gradedCount})</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl space-y-2">
+                <div className="flex items-start gap-2 text-xs text-amber-900 font-semibold">
+                  <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                  <span>Belum ada tugas/ulangan tersimpan untuk kelas <b>{selectedClass}</b>. Buat penugasan baru sekarang agar nilai terhubung otomatis.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsCreatingAssignmentModal(true)}
+                  className="w-full py-1.5 bg-amber-500 hover:bg-amber-600 text-white font-extrabold text-xs rounded-xl shadow-2xs flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  {classAssignments.map(assign => (
-                    <option key={assign.id} value={assign.id}>
-                      {assign.title} ({assign.category || "Tugas"} - {assign.className})
-                    </option>
-                  ))}
-                </select>
+                  <Plus size={14} /> Buat Tugas / Ulangan untuk {selectedClass}
+                </button>
               </div>
             )}
           </div>
@@ -1781,9 +2293,18 @@ export default function Penilaian({
                     ) : (
                       classStudents.map((student, idx) => {
                         const isChecked = selectedStudentsForBatch.includes(student.id);
+                        const sub = submissions.find(s => s.assignmentId === selectedAssignmentId && s.studentId === student.id);
+                        const gRow = grades.find(g => g.studentId === student.id);
+                        const gScore = gRow?.assignmentScores?.[selectedAssignmentId];
+                        const storedScore = (sub && sub.score !== null && sub.score !== undefined) 
+                          ? sub.score 
+                          : (gScore !== undefined ? gScore : (reviewedScores[student.id] !== undefined ? reviewedScores[student.id] : null));
+                        const isGraded = storedScore !== null && storedScore !== undefined;
+                        const isRevisingInline = expandedRevisionStudentId === student.id;
+
                         return (
                           <div
-                            key={student.id}
+                            key={`${student.id}_${idx}`}
                             className={`p-3 rounded-xl border transition-all ${
                               isChecked
                                 ? "bg-white border-indigo-200 shadow-xs"
@@ -1805,77 +2326,239 @@ export default function Penilaian({
                                   className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                                 />
                                 <div>
-                                  <span className="text-xs font-bold text-slate-800">{idx + 1}. {student.name}</span>
-                                  <span className="text-[10px] text-slate-400 ml-2 font-mono">NIS: {student.nis}</span>
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-xs font-bold text-slate-800">{idx + 1}. {student.name}</span>
+                                    <span className="text-[10px] text-slate-400 font-mono">NIS: {student.nis}</span>
+                                    {isGraded ? (
+                                      <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded font-black text-[10px] flex items-center gap-0.5">
+                                        <CheckCircle2 size={10} /> Nilai: {storedScore}
+                                      </span>
+                                    ) : (
+                                      <span className="px-1.5 py-0.5 bg-slate-100 text-slate-500 rounded font-semibold text-[9px]">
+                                        Belum Dinilai
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
                               </div>
 
-                              <div className="flex flex-wrap items-center gap-2">
-                                <label className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer shrink-0">
-                                  <Upload size={12} />
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (isRevisingInline) {
+                                      setExpandedRevisionStudentId(null);
+                                    } else {
+                                      setExpandedRevisionStudentId(student.id);
+                                      setInlineScoreEdits(prev => ({ ...prev, [student.id]: String(storedScore ?? 80) }));
+                                      setInlineAnswerEdits(prev => ({ ...prev, [student.id]: batchStudentAnswers[student.id] || sub?.studentAnswer || "" }));
+                                    }
+                                  }}
+                                  className={`px-2 py-1 rounded-lg text-[10px] font-extrabold flex items-center gap-1 transition-all cursor-pointer ${
+                                    isRevisingInline
+                                      ? "bg-amber-500 text-white"
+                                      : "bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200"
+                                  }`}
+                                  title="Ubah nilai atau jawaban secara langsung"
+                                >
+                                  <Edit3 size={11} />
+                                  <span>{isRevisingInline ? "Tutup" : "Revisi Nilai/Jawaban"}</span>
+                                </button>
+
+                                <label 
+                                  className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shrink-0 ${
+                                    (studentUploadedFiles[student.id]?.length || 0) >= 10
+                                      ? "bg-slate-100 text-slate-400 cursor-not-allowed"
+                                      : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700"
+                                  }`}
+                                >
+                                  <Upload size={11} />
                                   <span className="hidden sm:inline">Upload</span> Berkas
+                                  {(studentUploadedFiles[student.id]?.length || 0) > 0 && (
+                                    <span className="bg-indigo-600 text-white px-1.5 py-0.2 rounded-full text-[9px] font-black">
+                                      {studentUploadedFiles[student.id]?.length}
+                                    </span>
+                                  )}
                                   <input
                                     type="file"
+                                    multiple
                                     accept=".pdf,application/pdf,image/*,.jpg,.jpeg,.png,.webp,.heic"
+                                    disabled={(studentUploadedFiles[student.id]?.length || 0) >= 10}
                                     onChange={(e) => handleStudentFileUpload(student.id, student.name, e)}
                                     className="hidden"
                                   />
                                 </label>
                                 
-                                <label className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer shrink-0">
-                                  <Camera size={12} />
+                                <button
+                                  type="button"
+                                  disabled={(studentUploadedFiles[student.id]?.length || 0) >= 10}
+                                  onClick={() => setCameraTargetStudent({ id: student.id, name: student.name })}
+                                  className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shrink-0 ${
+                                    (studentUploadedFiles[student.id]?.length || 0) >= 10
+                                      ? "bg-slate-100 text-slate-400 cursor-not-allowed"
+                                      : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700"
+                                  }`}
+                                >
+                                  <Camera size={11} />
                                   <span className="hidden sm:inline">Ambil</span> Foto
-                                  <input
-                                    type="file"
-                                    accept="image/*"
-                                    capture="environment"
-                                    onChange={(e) => handleStudentFileUpload(student.id, student.name, e)}
-                                    className="hidden"
-                                  />
-                                </label>
+                                </button>
 
-                                <span className="text-[10px] text-slate-400 bg-slate-100 px-2 py-0.5 rounded-md font-mono shrink-0">
-                                  {batchStudentAnswers[student.id]?.length || 0} karakter
+                                <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-md font-mono shrink-0">
+                                  {batchStudentAnswers[student.id]?.length || 0} char
                                 </span>
                               </div>
                             </div>
 
-                            {studentUploadedFiles[student.id] && (
-                              <div className="mt-2 flex items-center justify-between gap-2 bg-emerald-50 border border-emerald-200 p-2 rounded-lg text-xs text-emerald-900">
-                                <div className="flex items-center gap-1.5 truncate">
-                                  <FileCheck2 size={14} className="text-emerald-600 shrink-0" />
-                                  <span className="font-bold truncate max-w-[180px]">{studentUploadedFiles[student.id].name}</span>
+                            {/* INLINE REVISION BOX */}
+                            {isRevisingInline && (
+                              <div className="mt-2.5 p-3 bg-amber-50/90 border border-amber-300/80 rounded-xl space-y-2 text-xs">
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                  <div className="flex items-center gap-1.5 font-bold text-amber-950">
+                                    <Edit3 size={13} className="text-amber-600" />
+                                    <span>Revisi Langsung Nilai & Jawaban: <b>{student.name}</b></span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <label className="text-[10px] font-black text-slate-700 uppercase">Nilai Akhir:</label>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      max="100"
+                                      value={inlineScoreEdits[student.id] ?? String(storedScore ?? 80)}
+                                      onChange={(e) => {
+                                        const v = e.target.value;
+                                        setInlineScoreEdits(prev => ({ ...prev, [student.id]: v }));
+                                      }}
+                                      className="w-16 bg-white border-2 border-amber-300 rounded-lg px-2 py-0.5 font-black text-xs text-indigo-900 text-center"
+                                      placeholder="85"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSaveInlineStudentRevision(student.id)}
+                                      className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-black text-xs shadow-2xs flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <Save size={12} />
+                                      <span>Simpan</span>
+                                    </button>
+                                  </div>
                                 </div>
-                                <div className="flex items-center gap-1 shrink-0">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleRunOCRForStudent(student.id, student.name)}
-                                    disabled={ocrLoadingStudentId === student.id}
-                                    className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-[10px] font-black flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                                    title="Pindai Teks Jawaban dengan AI Vision"
-                                  >
-                                    <Sparkles size={11} className={ocrLoadingStudentId === student.id ? "animate-spin" : ""} />
-                                    <span>{ocrLoadingStudentId === student.id ? "Memindai..." : "Pindai OCR AI"}</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setStudentUploadedFiles(prev => {
-                                        const next = { ...prev };
-                                        delete next[student.id];
-                                        return next;
-                                      });
+
+                                <div className="space-y-1">
+                                  <label className="text-[10px] font-bold text-slate-600 uppercase">Teks Jawaban Siswa:</label>
+                                  <textarea
+                                    rows={2}
+                                    value={inlineAnswerEdits[student.id] ?? (batchStudentAnswers[student.id] || sub?.studentAnswer || "")}
+                                    onChange={(e) => {
+                                      const v = e.target.value;
+                                      setInlineAnswerEdits(prev => ({ ...prev, [student.id]: v }));
+                                      setBatchStudentAnswers(prev => ({ ...prev, [student.id]: v }));
                                     }}
-                                    className="p-1 text-slate-400 hover:text-rose-600 cursor-pointer"
-                                    title="Hapus berkas"
-                                  >
-                                    <X size={13} />
-                                  </button>
+                                    placeholder={`Ketik / edit jawaban ${student.name}...`}
+                                    className="w-full bg-white border border-amber-200 rounded-lg p-2 text-[11px] font-mono focus:ring-1 focus:ring-amber-500"
+                                  />
                                 </div>
                               </div>
                             )}
 
-                            {isChecked && (
+                            {/* MULTI-PHOTO GALLERY FOR STUDENT */}
+                            {studentUploadedFiles[student.id] && studentUploadedFiles[student.id].length > 0 && (
+                              <div className="mt-2.5 p-3 bg-emerald-50/80 border border-emerald-200 rounded-2xl space-y-2 text-xs text-emerald-950">
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <FileCheck2 size={15} className="text-emerald-600 shrink-0" />
+                                    <span className="font-extrabold text-xs text-emerald-900">
+                                      Foto Jawaban: {student.name} ({studentUploadedFiles[student.id].length}/10 Foto)
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-800 text-[10px] font-black">
+                                      Multi-Photo AI
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRunOCRForStudent(student.id, student.name)}
+                                      disabled={ocrLoadingStudentId === student.id}
+                                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-black flex items-center gap-1 cursor-pointer shadow-2xs disabled:opacity-50"
+                                      title="Pindai Seluruh Foto Jawaban dengan AI Vision"
+                                    >
+                                      <Sparkles size={12} className={ocrLoadingStudentId === student.id ? "animate-spin" : ""} />
+                                      <span>{ocrLoadingStudentId === student.id ? "Memindai..." : "Pindai OCR AI All"}</span>
+                                    </button>
+
+                                    {studentUploadedFiles[student.id].length < 10 && (
+                                      <label className="px-2 py-1 bg-white hover:bg-emerald-100 text-emerald-700 border border-emerald-300 rounded-lg text-[10px] font-bold flex items-center gap-1 cursor-pointer">
+                                        <Plus size={11} />
+                                        <span>Foto Lagi</span>
+                                        <input
+                                          type="file"
+                                          multiple
+                                          accept=".pdf,application/pdf,image/*,.jpg,.jpeg,.png,.webp,.heic"
+                                          onChange={(e) => handleStudentFileUpload(student.id, student.name, e)}
+                                          className="hidden"
+                                        />
+                                      </label>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveStudentPhoto(student.id)}
+                                      className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                                      title="Hapus semua foto"
+                                    >
+                                      <X size={11} />
+                                      <span>Hapus Semua</span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* THUMBNAILS GRID */}
+                                <div className="flex flex-wrap items-center gap-2 pt-1">
+                                  {studentUploadedFiles[student.id].map((photoItem, idx) => (
+                                    <div
+                                      key={photoItem.id}
+                                      className="relative group bg-white border border-emerald-300/80 rounded-xl p-1.5 flex items-center gap-2 shadow-2xs hover:border-emerald-500 transition-all cursor-pointer"
+                                      onClick={() => setPreviewPhotoModal({
+                                        studentName: student.name,
+                                        photos: studentUploadedFiles[student.id],
+                                        activeIndex: idx
+                                      })}
+                                    >
+                                      {photoItem.mimeType.includes("pdf") ? (
+                                        <div className="w-10 h-10 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-[10px] shrink-0">
+                                          PDF
+                                        </div>
+                                      ) : (
+                                        <img
+                                          src={photoItem.base64}
+                                          alt={`Hal ${idx + 1}`}
+                                          className="w-10 h-10 rounded-lg object-cover border border-slate-200 shrink-0"
+                                        />
+                                      )}
+                                      <div className="pr-5 space-y-0.5">
+                                        <div className="text-[10px] font-extrabold text-indigo-950 flex items-center gap-1">
+                                          <span>Hal {idx + 1}</span>
+                                          <Eye size={10} className="text-emerald-600" />
+                                        </div>
+                                        <p className="text-[9px] text-slate-500 max-w-[80px] truncate">{photoItem.name}</p>
+                                      </div>
+
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleRemoveStudentPhoto(student.id, photoItem.id);
+                                        }}
+                                        className="absolute top-1 right-1 p-0.5 bg-rose-500 hover:bg-rose-600 text-white rounded-full transition-all shadow-2xs cursor-pointer"
+                                        title="Hapus foto ini"
+                                      >
+                                        <X size={10} />
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {isChecked && !isRevisingInline && (
                               <textarea
                                 rows={2}
                                 value={batchStudentAnswers[student.id] || ""}
@@ -2030,31 +2713,185 @@ export default function Penilaian({
                 </button>
               </div>
 
-              {/* Single Mode: Submission Selection from App state */}
-              {classAssignments.length > 0 && (
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase">Pilih Siswa Terdaftar</label>
-                  <select
-                    value={selectedSubmissionId}
-                    onChange={(e) => handleSubmissionSelect(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                  >
-                    <option value="">-- Mode Bebas / Nama Manual --</option>
-                    {assignmentSubmissions.map(sub => (
-                      <option key={sub.id} value={sub.id}>
-                        {sub.studentName} ({sub.status === "Selesai" ? "Nilai: " + sub.score : "Belum Dinilai"})
+              {/* Single Mode: Student Selection with Badges */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase">
+                    Pilih Siswa Kelas {selectedClass}
+                  </label>
+                  {activeStudentExistingData?.isGraded && (
+                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-md text-[10px] font-black flex items-center gap-1">
+                      <CheckCircle2 size={11} /> Sudah Dinilai (Skor: {activeStudentExistingData.score})
+                    </span>
+                  )}
+                </div>
+                <select
+                  value={activeStudentId}
+                  onChange={(e) => handleStudentSelection(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                >
+                  <option value="">-- Pilih Siswa ({classStudents.length} Siswa Terdaftar) --</option>
+                  {classStudents.map((st, idx) => {
+                    const sub = submissions.find(s => s.assignmentId === selectedAssignmentId && s.studentId === st.id);
+                    const gRow = grades.find(g => g.studentId === st.id);
+                    const gScore = gRow?.assignmentScores?.[selectedAssignmentId];
+                    const finalScore = (sub && sub.score !== null && sub.score !== undefined) 
+                      ? sub.score 
+                      : (gScore !== undefined ? gScore : null);
+                    const isGraded = finalScore !== null && finalScore !== undefined;
+
+                    return (
+                      <option key={st.id} value={st.id}>
+                        {idx + 1}. {st.name} {isGraded ? `[🟢 Nilai: ${finalScore} - Selesai]` : (sub?.studentAnswer ? `[🟡 Ada Jawaban]` : `[⚪ Belum Dinilai]`)}
                       </option>
-                    ))}
-                  </select>
+                    );
+                  })}
+                </select>
+              </div>
+
+              {/* ACTIVE STUDENT REVISION PANEL (IF ALREADY GRADED) */}
+              {activeStudentId && activeStudentExistingData?.isGraded && (
+                <div className="p-4 bg-gradient-to-br from-amber-50/90 to-indigo-50/70 border-2 border-amber-300/80 rounded-2xl space-y-3.5 shadow-xs">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-amber-200/80 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="p-1.5 bg-amber-400 text-slate-900 rounded-lg">
+                        <Edit3 size={16} />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-black text-slate-900 flex items-center gap-1.5">
+                          <span>Panel Revisi Nilai & Jawaban: <b>{activeStudentName}</b></span>
+                        </h4>
+                        <p className="text-[11px] text-slate-600">
+                          Siswa ini sudah dinilai sebelumnya dengan skor <b>{activeStudentExistingData.score}</b>. Anda dapat mengubah nilai secara langsung atau memperbaiki jawaban.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs font-black px-2.5 py-1 bg-white border border-amber-300 rounded-xl text-amber-900 shadow-2xs">
+                        Skor Saat Ini: <span className="text-sm font-extrabold text-indigo-700">{activeStudentExistingData.score}</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Manual Score Input & Quick Deltas */}
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                    <div className="sm:col-span-4 space-y-1">
+                      <label className="text-[10px] font-extrabold text-slate-700 uppercase flex items-center gap-1">
+                        <span>Revisi Nilai Akhir (0-100)</span>
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={editableScore}
+                          onChange={(e) => setEditableScore(e.target.value)}
+                          className="w-full bg-white border-2 border-indigo-300 rounded-xl px-3 py-2 text-sm font-black text-indigo-900 focus:ring-2 focus:ring-indigo-500"
+                          placeholder="85"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">/ 100</span>
+                      </div>
+                    </div>
+
+                    <div className="sm:col-span-8 space-y-1">
+                      <label className="text-[10px] font-extrabold text-slate-600 uppercase">Preset Cepat Nilai</label>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {[
+                          { label: "KKM (75)", val: 75 },
+                          { label: "80", val: 80 },
+                          { label: "85", val: 85 },
+                          { label: "90", val: 90 },
+                          { label: "95", val: 95 },
+                          { label: "100", val: 100 },
+                          { label: "-5", delta: -5 },
+                          { label: "+5", delta: 5 }
+                        ].map((btn, idx) => (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => {
+                              if (btn.val !== undefined) {
+                                setEditableScore(String(btn.val));
+                              } else if (btn.delta !== undefined) {
+                                const curr = parseFloat(editableScore) || (activeStudentExistingData.score || 75);
+                                const next = Math.min(100, Math.max(0, curr + btn.delta));
+                                setEditableScore(String(next));
+                              }
+                            }}
+                            className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg text-[11px] font-extrabold text-slate-700 shadow-2xs transition-all cursor-pointer"
+                          >
+                            {btn.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Revision Note / Feedback */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-600 uppercase">
+                      Catatan Revisi / Umpan Balik Guru (Opsional)
+                    </label>
+                    <input
+                      type="text"
+                      value={singleRevisionNote}
+                      onChange={(e) => setSingleRevisionNote(e.target.value)}
+                      placeholder="Contoh: Remidial tuntas, perbaikan jawaban uraian..."
+                      className="w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-700 focus:ring-2 focus:ring-indigo-500/20"
+                    />
+                  </div>
+
+                  {/* Direct Action Buttons for Revision */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleSaveSingleManualRevision}
+                      className="flex-1 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-xs flex items-center justify-center gap-2 transition-all cursor-pointer"
+                    >
+                      <Save size={15} />
+                      <span>Simpan Revisi Nilai & Jawaban Langsung</span>
+                    </button>
+                    {activeStudentExistingData.aiAnalysis && (
+                      <button
+                        type="button"
+                        onClick={() => setShowSavedAnalysisDetails(prev => !prev)}
+                        className="px-3 py-2.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-extrabold text-xs rounded-xl flex items-center gap-1.5 transition-all cursor-pointer"
+                      >
+                        <Eye size={14} />
+                        <span>{showSavedAnalysisDetails ? "Tutup Riwayat AI" : "Lihat Riwayat AI"}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Saved AI Analysis Breakdown Accordion */}
+                  {showSavedAnalysisDetails && activeStudentExistingData.aiAnalysis && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      className="p-3 bg-white border border-indigo-100 rounded-xl text-xs space-y-2 text-slate-700"
+                    >
+                      <div className="font-extrabold text-indigo-900 flex items-center gap-1.5">
+                        <Sparkles size={14} className="text-indigo-600" />
+                        <span>Riwayat Analisis AI Tersimpan:</span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 bg-slate-50 p-2 rounded-lg leading-relaxed">
+                        {activeStudentExistingData.aiAnalysis.analysis || activeStudentExistingData.aiAnalysis.feedback || "Tidak ada rincian catatan."}
+                      </p>
+                    </motion.div>
+                  )}
                 </div>
               )}
 
               <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-500 uppercase">Nama Siswa</label>
+                <label className="text-[10px] font-bold text-slate-500 uppercase">Nama Siswa Terpilih</label>
                 <input
                   type="text"
                   value={studentName}
-                  onChange={(e) => setStudentName(e.target.value)}
+                  onChange={(e) => {
+                    setStudentName(e.target.value);
+                    setActiveStudentName(e.target.value);
+                  }}
                   placeholder="Contoh: Ahmad Dani"
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                 />
@@ -2107,9 +2944,16 @@ export default function Penilaian({
                 </div>
               ) : (
                 <div className="space-y-2">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase">Jawaban Siswa (Teks)</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Jawaban Siswa (Teks / Hasil Pemindaian)
+                    </label>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {studentAnswer.length} karakter
+                    </span>
+                  </div>
                   <textarea
-                    rows={5}
+                    rows={6}
                     value={studentAnswer}
                     onChange={(e) => setStudentAnswer(e.target.value)}
                     placeholder="Tempelkan atau ketik jawaban siswa di sini..."
@@ -2118,7 +2962,7 @@ export default function Penilaian({
                 </div>
               )}
 
-              {/* Single Trigger */}
+              {/* Single Trigger & Action Bar */}
               <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
                 {error ? (
                   <div className="flex items-center gap-1.5 text-xs text-rose-600 font-bold">
@@ -2127,16 +2971,28 @@ export default function Penilaian({
                   </div>
                 ) : <div />}
 
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={handleSingleAIEvaluation}
-                  disabled={loading}
-                  className="w-full sm:w-auto px-6 py-3 bg-gradient-to-r from-indigo-600 via-indigo-700 to-violet-700 hover:opacity-95 text-white font-extrabold text-xs md:text-sm rounded-2xl shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
-                >
-                  <Cpu size={18} className={loading ? "animate-spin" : ""} />
-                  {loading ? "Memproses Koreksi AI..." : "Mulai Koreksi Siswa Ini"}
-                </motion.button>
+                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                  {activeStudentId && !activeStudentExistingData?.isGraded && (
+                    <button
+                      type="button"
+                      onClick={handleSaveSingleManualRevision}
+                      className="px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-extrabold text-xs rounded-2xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Save size={16} />
+                      <span>Simpan Manual</span>
+                    </button>
+                  )}
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={handleSingleAIEvaluation}
+                    disabled={loading}
+                    className="flex-1 sm:flex-none px-6 py-3 bg-gradient-to-r from-indigo-600 via-indigo-700 to-violet-700 hover:opacity-95 text-white font-extrabold text-xs md:text-sm rounded-2xl shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                  >
+                    <Cpu size={18} className={loading ? "animate-spin" : ""} />
+                    {loading ? "Memproses Koreksi AI..." : (activeStudentExistingData?.isGraded ? "Koreksi Ulang Jawaban dengan AI" : "Mulai Koreksi Siswa Ini")}
+                  </motion.button>
+                </div>
               </div>
             </div>
           )}
@@ -2451,7 +3307,7 @@ export default function Penilaian({
                     const displayAbsen = r.absenNo ? String(r.absenNo).padStart(2, '0') : String(idx + 1).padStart(2, '0');
 
                     return (
-                      <Fragment key={r.studentId}>
+                      <Fragment key={`${r.studentId}_${idx}`}>
                         <tr
                           className={`hover:bg-slate-50 transition-colors ${
                             isSelected ? "bg-indigo-50/30" : ""
@@ -2978,7 +3834,7 @@ export default function Penilaian({
                   Sebanyak <b>{integrationSuccessModal.count} nilai siswa</b> telah berhasil diterapkan ke Buku Nilai kolom <b>{integrationSuccessModal.target}</b> (Kelas {selectedClass}).
                 </p>
                 <p className="text-[11px] text-slate-400 mt-1">
-                  Data telah disinkronkan secara realtime ke Cloud Firestore dan dapat diakses dari HP & Laptop.
+                  Data telah tersimpan di Cloud Firestore dan dapat diakses dari HP & Laptop.
                 </p>
               </div>
 
@@ -3008,6 +3864,357 @@ export default function Penilaian({
           </div>
         )}
       </AnimatePresence>
+
+      {/* ========================================================================= */}
+      {/* QUICK CREATE ASSIGNMENT MODAL                                            */}
+      {/* ========================================================================= */}
+      <AnimatePresence>
+        {isCreatingAssignmentModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl max-w-lg w-full p-6 space-y-5 shadow-2xl border border-slate-200"
+            >
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 bg-indigo-100 text-indigo-700 rounded-xl">
+                    <Plus size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-black text-slate-900">Buat Penugasan / Ulangan Baru</h3>
+                    <p className="text-xs text-slate-500">Kelas: <b>{selectedClass}</b></p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsCreatingAssignmentModal(false)}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <form onSubmit={handleQuickCreateSubmit} className="space-y-3.5 text-xs">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-600 uppercase">Judul Tugas / Ulangan</label>
+                  <input
+                    type="text"
+                    required
+                    value={newAssignTitle}
+                    onChange={(e) => setNewAssignTitle(e.target.value)}
+                    placeholder="Contoh: Ulangan Harian Bab 3 - Permintaan & Penawaran"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 font-semibold text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500/20"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-600 uppercase">Kategori</label>
+                    <select
+                      value={newAssignCategory}
+                      onChange={(e) => setNewAssignCategory(e.target.value as any)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-semibold text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500/20"
+                    >
+                      <option value="Ulangan Harian">Ulangan Harian</option>
+                      <option value="Tugas">Tugas Mandiri / Kelompok</option>
+                      <option value="Proyek">Proyek</option>
+                      <option value="Kuis">Kuis</option>
+                      <option value="Lainnya">Lainnya</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-600 uppercase">Skor Maksimal</label>
+                    <input
+                      type="number"
+                      min="10"
+                      max="1000"
+                      value={newAssignMaxScore}
+                      onChange={(e) => setNewAssignMaxScore(Number(e.target.value) || 100)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-semibold text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500/20"
+                    />
+                  </div>
+                </div>
+
+                <div className="pt-2 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsCreatingAssignmentModal(false)}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-extrabold shadow-sm flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Check size={14} /> Simpan & Hubungkan
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ========================================================================= */}
+      {/* GRADED STUDENTS REVISION MODAL (MASS REVISION / EDITING)                  */}
+      {/* ========================================================================= */}
+      <AnimatePresence>
+        
+      {cameraTargetStudent && (
+        <CameraCaptureModal 
+          title={`Ambil Foto Jawaban: ${cameraTargetStudent.name}`}
+          onCapture={handleCameraCapture}
+          onClose={() => setCameraTargetStudent(null)}
+        />
+      )}
+
+      {isGradedStudentsModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-3xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-slate-200"
+            >
+              {/* Header */}
+              <div className="p-5 bg-gradient-to-r from-indigo-800 via-indigo-700 to-violet-800 text-white flex items-center justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-extrabold uppercase tracking-widest text-amber-300 bg-white/10 px-2 py-0.5 rounded-md">
+                      Pusat Revisi Nilai Siswa
+                    </span>
+                    <span className="text-[10px] font-bold text-white bg-indigo-500/50 px-2 py-0.5 rounded-md">
+                      Kelas: {selectedClass}
+                    </span>
+                  </div>
+                  <h3 className="text-base font-black font-display mt-1">
+                    Daftar Nilai & Jawaban Tersimpan: {assignmentStats.currentAssign?.title || "Penugasan"}
+                  </h3>
+                  <p className="text-xs text-indigo-100">
+                    Periksa dan perbaiki nilai siswa yang telah dinilai sebelumnya atau dimuat dari cadangan data.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setIsGradedStudentsModalOpen(false)}
+                  className="p-2 text-white/80 hover:text-white bg-white/10 hover:bg-white/20 rounded-full transition-colors cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Toolbar */}
+              <div className="p-4 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-slate-700">Total:</span>
+                    <span className="font-extrabold text-slate-900">{assignmentStats.studentCount} Siswa</span>
+                  </div>
+                  <span>•</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-emerald-700">Sudah Dinilai:</span>
+                    <span className="font-extrabold text-emerald-800">{assignmentStats.gradedCount} Siswa</span>
+                  </div>
+                  <span>•</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-amber-700">Rata-Rata:</span>
+                    <span className="font-extrabold text-amber-800">{assignmentStats.avgScore}</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSyncFromRestoredData}
+                    className="px-3 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl text-slate-700 font-extrabold text-xs flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  >
+                    <RotateCcw size={12} className="text-indigo-600" />
+                    <span>Muat Ulang Cadangan</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveAllModalRevisions}
+                    className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold text-xs flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  >
+                    <Save size={13} />
+                    <span>Simpan Semua Revisi</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Table */}
+              <div className="p-4 overflow-y-auto flex-1 space-y-2">
+                <div className="overflow-x-auto border border-slate-200 rounded-2xl">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 font-extrabold uppercase text-[10px]">
+                        <th className="p-3 text-center w-12">No</th>
+                        <th className="p-3">Nama Siswa</th>
+                        <th className="p-3 text-center w-28">Status</th>
+                        <th className="p-3 text-center w-28 bg-indigo-50/60 text-indigo-900">Revisi Nilai</th>
+                        <th className="p-3">Teks Jawaban Siswa</th>
+                        <th className="p-3 text-center w-24">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-slate-700">
+                      {assignmentStats.gradedList.map((item, idx) => {
+                        const currentScoreVal = batchModalScores[item.student.id] ?? (item.score !== null ? String(item.score) : "");
+                        const currentAnswerVal = batchModalAnswers[item.student.id] ?? item.savedAnswer;
+
+                        return (
+                          <tr key={`${item.student.id}_${idx}`} className="hover:bg-slate-50/80">
+                            <td className="p-3 text-center font-bold text-slate-400">{idx + 1}</td>
+                            <td className="p-3">
+                              <div className="font-extrabold text-slate-900">{item.student.name}</div>
+                              <div className="text-[10px] text-slate-400 font-mono">NIS: {item.student.nis}</div>
+                            </td>
+                            <td className="p-3 text-center">
+                              {item.isGraded ? (
+                                <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-full font-extrabold text-[10px]">
+                                  Tuntas ({item.score})
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded-full text-[10px] font-medium">
+                                  Belum Dinilai
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-2 text-center bg-indigo-50/20">
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                value={currentScoreVal}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setBatchModalScores(prev => ({ ...prev, [item.student.id]: val }));
+                                }}
+                                placeholder="0-100"
+                                className="w-16 bg-white border-2 border-indigo-200 focus:border-indigo-500 rounded-lg py-1 px-1.5 text-xs font-black text-indigo-900 text-center"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <textarea
+                                rows={1}
+                                value={currentAnswerVal}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setBatchModalAnswers(prev => ({ ...prev, [item.student.id]: val }));
+                                }}
+                                placeholder="Ketik / edit jawaban siswa..."
+                                className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-mono focus:ring-1 focus:ring-indigo-500 resize-none"
+                              />
+                            </td>
+                            <td className="p-3 text-center">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsGradedStudentsModalOpen(false);
+                                  handleStudentSelection(item.student.id);
+                                }}
+                                className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-[10px] font-black cursor-pointer"
+                                title="Buka detail di panel Koreksi Mandiri"
+                              >
+                                Buka di AI
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
+                <span className="text-xs text-slate-500 font-medium">
+                  Perubahan akan langsung disimpan ke Buku Nilai kelas {selectedClass}.
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsGradedStudentsModalOpen(false)}
+                    className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded-xl cursor-pointer"
+                  >
+                    Tutup
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveAllModalRevisions}
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black rounded-xl shadow-xs cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Save size={14} />
+                    <span>Simpan Semua Perubahan</span>
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* PREVIEW PHOTO MODAL FOR MULTI-PHOTO VIEWING */}
+      {previewPhotoModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+              <h4 className="font-extrabold text-slate-800 text-sm flex items-center gap-2">
+                <FileText size={18} className="text-indigo-600" />
+                <span>Foto Jawaban: {previewPhotoModal.studentName} (Foto {previewPhotoModal.activeIndex + 1} dari {previewPhotoModal.photos.length})</span>
+              </h4>
+              <button
+                type="button"
+                onClick={() => setPreviewPhotoModal(null)}
+                className="p-1.5 bg-slate-200 hover:bg-slate-300 rounded-full transition-colors text-slate-600 cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 bg-slate-950 relative flex items-center justify-center p-4 overflow-auto min-h-[350px]">
+              {previewPhotoModal.photos[previewPhotoModal.activeIndex]?.mimeType.includes("pdf") ? (
+                <div className="text-white text-center p-6">
+                  <FileText size={48} className="mx-auto mb-2 text-indigo-400" />
+                  <p className="text-sm font-bold">{previewPhotoModal.photos[previewPhotoModal.activeIndex]?.name}</p>
+                  <p className="text-xs text-slate-400 mt-1">Dokumen PDF Terlampir</p>
+                </div>
+              ) : (
+                <img
+                  src={previewPhotoModal.photos[previewPhotoModal.activeIndex]?.base64}
+                  alt={`Foto ${previewPhotoModal.activeIndex + 1}`}
+                  className="max-w-full max-h-[70vh] object-contain rounded-xl shadow-lg"
+                />
+              )}
+            </div>
+            {previewPhotoModal.photos.length > 1 && (
+              <div className="p-3 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
+                <button
+                  type="button"
+                  disabled={previewPhotoModal.activeIndex === 0}
+                  onClick={() => setPreviewPhotoModal(prev => prev ? { ...prev, activeIndex: prev.activeIndex - 1 } : null)}
+                  className="px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+                >
+                  ← Foto Sebelumnya
+                </button>
+                <span className="text-xs font-bold text-slate-600 font-mono">
+                  Halaman {previewPhotoModal.activeIndex + 1} / {previewPhotoModal.photos.length}
+                </span>
+                <button
+                  type="button"
+                  disabled={previewPhotoModal.activeIndex === previewPhotoModal.photos.length - 1}
+                  onClick={() => setPreviewPhotoModal(prev => prev ? { ...prev, activeIndex: prev.activeIndex + 1 } : null)}
+                  className="px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+                >
+                  Foto Selanjutnya →
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
     </div>
   );

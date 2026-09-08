@@ -3,9 +3,19 @@ export interface Student {
   name: string;
   nis: string;
   className: string;
+  photo?: string;
+  photoRotation?: number;
+  gender?: 'L' | 'P' | string;
+  placeOfBirth?: string;
+  dateOfBirth?: string;
+  religion?: string;
+  address?: string;
+  parentName?: string;
+  parentPhone?: string;
+  studentPhone?: string;
 }
 
-export type AttendanceStatus = 'Hadir' | 'Sakit' | 'Izin' | 'Alpa';
+export type AttendanceStatus = 'Hadir' | 'Sakit' | 'Izin' | 'Alpa' | 'Tidak Mengajar';
 
 export interface Attendance {
   id: string;
@@ -45,10 +55,16 @@ export interface Submission {
   score: number | null;
   status: 'Belum Dikumpulkan' | 'Perlu Dinilai' | 'Selesai';
   aiAnalysis?: {
-    score: number;
-    analysis: string;
-    feedback: string;
-    suggestions: string;
+    score?: number;
+    totalScore?: number;
+    grade?: string;
+    status?: string;
+    summaryPerType?: Array<{ type: string; score: number; maxScore: number; correctCount: string }>;
+    items?: Array<{ no: number; type: string; studentAnswer: string; answerKey: string; status: string; score: number; maxScore: number; note: string }>;
+    analysis?: string;
+    feedback?: string;
+    suggestions?: string;
+    [key: string]: any;
   };
 }
 
@@ -86,6 +102,7 @@ export interface HomeVisitReport {
   photos: string[]; // base64 images
   teacherName?: string;
   nip?: string;
+  category?: string;
 }
 
 export interface JournalEntry {
@@ -112,4 +129,95 @@ export interface JournalEntry {
   descriptionText?: string;   // direct description list like in the image
 }
 
+export type MaterialType = 'presentation' | 'video' | 'document' | 'link';
 
+export interface LearningMaterialNote {
+  id: string;
+  timestamp?: string; // e.g. "03:15" or "Slide 4"
+  content: string;
+  createdAt: string;
+}
+
+export interface LearningMaterial {
+  id: string;
+  title: string;
+  description?: string;
+  subject: string;
+  className: string; // Multi-class string, e.g. "XII-C2, XII-C3" or "Semua Kelas"
+  targetClasses?: string[]; // Array of target classes e.g. ["XII-C2", "XII-C3"]
+  type: MaterialType;
+  driveUrl: string; // Link asli Google Drive / YouTube / Web
+  embedUrl: string; // Link embed iframe hasil konversi otomatis
+  thumbnailUrl?: string;
+  topic?: string;
+  bab?: string; // Contoh: "BAB 1: Konsep Dasar Ilmu Ekonomi"
+  subBab?: string; // Contoh: "1.1 Kelangkaan & Kebutuhan Manusia"
+  createdAt: string;
+  fileSize?: string;
+  notes?: LearningMaterialNote[];
+  tags?: string[];
+}
+
+export interface EvaluationQuestion {
+  id: string;
+  type: 'pg' | 'pg_kompleks' | 'benar_salah' | 'isian' | 'essay' | 'menjodohkan';
+  question: string;
+  options?: string[];
+  matchingPairs?: { left: string; right: string }[];
+  shuffledRightsForSession?: string[];
+  correctAnswer: any; // string, string[], or Record<string, string> for menjodohkan
+  explanation?: string;
+  points: number;
+}
+
+export interface QuestionBankItem extends EvaluationQuestion {
+  subject: string;
+  className: string;
+  bab: string;
+  tags?: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvaluationExam {
+  id: string;
+  title: string;
+  description: string;
+  subject: string;
+  className: string;
+  targetClasses?: string[];
+  durationMinutes: number;
+  token?: string;
+  bab?: string;
+  questions: EvaluationQuestion[];
+  createdAt: string;
+  status: 'aktif' | 'draft' | 'selesai';
+  isSecureMode?: boolean;
+  isShuffleQuestions?: boolean;
+  isShuffleOptions?: boolean;
+  examPackage?: string;
+}
+
+export interface ViolationLog {
+  timestamp: string;
+  type: 'exit_fullscreen' | 'tab_switch' | 'split_screen' | 'copy_attempt' | 'window_resize';
+  description: string;
+}
+
+export interface EvaluationSubmission {
+  id: string;
+  examId: string;
+  studentId: string;
+  studentName: string;
+  className: string;
+  answers: Record<string, any>;
+  flaggedQuestionIds?: string[];
+  score: number;
+  totalMaxScore: number;
+  percentageScore: number;
+  startedAt: string;
+  submittedAt: string;
+  durationSecondsUsed: number;
+  violations: ViolationLog[];
+  status: 'selesai' | 'diskualifikasi';
+}

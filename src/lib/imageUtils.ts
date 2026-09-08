@@ -9,7 +9,10 @@ export async function compressImage(file: File, maxDimension = 800, quality = 0.
     reader.onerror = reject;
     reader.onload = (e) => {
       const img = new Image();
-      img.onerror = reject;
+      img.onerror = () => {
+        // Fallback to raw dataUrl if image element fails
+        resolve(e.target?.result as string);
+      };
       img.onload = () => {
         let width = img.width;
         let height = img.height;
@@ -50,3 +53,26 @@ export async function compressImage(file: File, maxDimension = 800, quality = 0.
     reader.readAsDataURL(file);
   });
 }
+
+/**
+ * Specifically optimized for OCR vision models (e.g. Gemini AI OCR).
+ * Preserves high resolution (up to 1800px) and 0.85 quality for crystal clear handwriting,
+ * while reducing 10MB+ camera uploads down to ~250KB for rapid API response without errors.
+ * Automatically handles PDFs by reading raw data URL.
+ */
+export async function compressFileForOCR(file: File, maxDimension = 1800, quality = 0.85): Promise<string> {
+  const name = file.name.toLowerCase();
+  const isPdf = file.type.includes("pdf") || name.endsWith(".pdf");
+
+  if (isPdf) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = reject;
+      reader.onload = (e) => resolve(e.target?.result as string);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  return compressImage(file, maxDimension, quality);
+}
+

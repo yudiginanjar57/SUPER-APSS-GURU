@@ -1,4 +1,4 @@
-import { useState, useMemo, ChangeEvent } from "react";
+import { useState, useMemo, ChangeEvent, useRef, useEffect } from "react";
 import { motion } from "motion/react";
 import { 
   Users, 
@@ -23,22 +23,87 @@ import {
   X,
   FileSpreadsheet,
   Eye,
-  Filter
+  Filter,
+  Download,
+  UserCircle,
+  Phone,
+  Mail,
+  RotateCw
 } from "lucide-react";
 import { Student, Attendance, Assignment, StudentGrade, HomeroomNote, HomeVisitReport } from "../types";
 import { compressImage } from "../lib/imageUtils";
+import { formatDriveImageUrl } from "../lib/driveUtils";
+import { safeStorage } from "../lib/safeStorage";
+import ExportPreviewModal from "./ExportPreviewModal";
+import { utils, writeFile, read } from "xlsx";
+import * as jspdfModule from "jspdf";
+import autoTable from "jspdf-autotable";
+
+export const HOME_VISIT_CATEGORIES = [
+  {
+    id: "kat1",
+    code: "Kategori 1",
+    title: "1. Siswa Alpa 3 Hari Berturut-turut atau 7 Kali Tidak Berturut-turut",
+    shortLabel: "Alpa 3x Berturut / 7x Akumulasi",
+    badge: "bg-rose-50 text-rose-700 border-rose-200",
+    badgeSolid: "bg-rose-600 text-white",
+    iconColor: "text-rose-600",
+    description: "Siswa yang alpa 3 hari secara berturut-turut atau akumulasi 7 kali tidak berturut-turut.",
+    template: "Kategori 1 (Alpa 3 Hari Berturut-turut / 7x Tidak Berturut-turut):\nSiswa tercatat tidak hadir tanpa keterangan (Alpa) secara beruntun / akumulasi melebihi batas toleransi."
+  },
+  {
+    id: "kat2",
+    code: "Kategori 2",
+    title: "2. Siswa Sakit Lebih Dari 3 Hari Berturut-turut atau 15 Hari Tidak Berturut-turut",
+    shortLabel: "Sakit > 3 Hari Berturut / 15x Akumulasi",
+    badge: "bg-amber-50 text-amber-700 border-amber-200",
+    badgeSolid: "bg-amber-600 text-white",
+    iconColor: "text-amber-600",
+    description: "Siswa yang sakit > 3 hari secara berturut-turut atau mencapai 15 hari secara tidak berturut-turut.",
+    template: "Kategori 2 (Sakit > 3 Hari Berturut-turut / 15 Hari Tidak Berturut-turut):\nSiswa mengalami sakit beruntun lebih dari 3 hari atau telah akumulasi 15 hari. Diperlukan peninjauan kesehatan, simpati sekolah, dan kelengkapan surat izin."
+  },
+  {
+    id: "kat3",
+    code: "Kategori 3",
+    title: "3. Siswa Yang Memiliki Tingkat Kehadiran Keseluruhan Kurang Dari 85%",
+    shortLabel: "Kehadiran < 85%",
+    badge: "bg-orange-50 text-orange-700 border-orange-200",
+    badgeSolid: "bg-orange-600 text-white",
+    iconColor: "text-orange-600",
+    description: "Siswa dengan rekap persentase kehadiran akumulatif di bawah 85%.",
+    template: "Kategori 3 (Tingkat Kehadiran < 85%):\nPersentase keikutsertaan siswa di kelas berada di bawah 85%. Kunjungan dilakukan untuk pencegahan risiko putus sekolah dan evaluasi kendala belajar."
+  },
+  {
+    id: "kat4",
+    code: "Kategori 4",
+    title: "4. Catatan Kenakalan Remaja, Penyalahgunaan Narkoba, dan Geng Motor",
+    shortLabel: "Pembinaan Khusus",
+    badge: "bg-purple-50 text-purple-700 border-purple-200",
+    badgeSolid: "bg-purple-600 text-white",
+    iconColor: "text-purple-600",
+    description: "Siswa yang dalam pembinaannya memiliki catatan kenakalan remaja, penyalahgunaan narkoba, atau geng motor.",
+    template: "Kategori 4 (Pembinaan Khusus - Kenakalan Remaja / Narkoba / Geng Motor):\nSiswa dalam pembinaan khusus terkait kenakalan remaja, indikasi penyalahgunaan narkoba, atau keterlibatan geng motor. Memerlukan penanganan sinergis bersama orang tua."
+  }
+];
 
 interface WaliKelasProps {
   homeroomClass: string;
   setHomeroomClass: (cls: string) => void;
   classList: string[];
   students: Student[];
+  setStudents: (students: Student[]) => void;
   attendanceList: Attendance[];
   assignments: Assignment[];
   grades: StudentGrade[];
   teacherName: string;
   nip: string;
   institution: string;
+  headmasterName?: string;
+  headmasterNip?: string;
+  headmasterRank?: string;
+  documentCity?: string;
+  schoolNpsn?: string;
+  academicYear?: string;
   notes: HomeroomNote[];
   onAddNote: (note: Omit<HomeroomNote, "id">) => void;
   onDeleteNote: (id: string) => void;
@@ -53,12 +118,19 @@ export default function WaliKelas({
   setHomeroomClass,
   classList,
   students,
+  setStudents,
   attendanceList,
   assignments,
   grades,
   teacherName,
   nip,
   institution,
+  headmasterName = "Dr. Hj. Yanti Suryanti, M.Pd.",
+  headmasterNip = "197005121995122001",
+  headmasterRank = "Pembina Utama Muda, IV/c",
+  documentCity = "Tasikmalaya",
+  schoolNpsn = "20224510",
+  academicYear = "2025/2026",
   notes,
   onAddNote,
   onDeleteNote,
@@ -67,12 +139,30 @@ export default function WaliKelas({
   onDeleteHomeVisit,
   onOpenSettings
 }: WaliKelasProps) {
-  const [activeSubTab, setActiveSubTab] = useState<"siswa" | "rekap-kehadiran" | "home-visit" | "rapor" | "pembinaan" | "perhatian">("siswa");
+  const [activeSubTab, setActiveSubTab] = useState<"siswa" | "profil-siswa" | "rekap-kehadiran" | "home-visit" | "rapor" | "pembinaan" | "perhatian">("siswa");
   const [searchQuery, setSearchQuery] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
 
   // Month filter for Attendance Recap
   const [selectedMonth, setSelectedMonth] = useState<string>("all");
+  const [selectedSemester, setSelectedSemester] = useState<1 | 2>(() => {
+    const saved = safeStorage.getItem("guru_attendance_semester");
+    if (saved === "1" || saved === "2") return parseInt(saved) as 1 | 2;
+    const m = new Date().getMonth() + 1;
+    return (m >= 7 && m <= 12) ? 1 : 2;
+  });
+
+  // Keep selected semester synchronized with local storage
+  useEffect(() => {
+    const saved = safeStorage.getItem("guru_attendance_semester");
+    if (saved === "1" || saved === "2") {
+      const val = parseInt(saved) as 1 | 2;
+      if (val !== selectedSemester) {
+        setSelectedSemester(val);
+      }
+    }
+  }, [activeSubTab]);
 
   // Form states for new homeroom note
   const [isOpenAddNoteModal, setIsOpenAddNoteModal] = useState(false);
@@ -85,12 +175,88 @@ export default function WaliKelas({
   // Form states for Home Visit Report
   const [isOpenHomeVisitModal, setIsOpenHomeVisitModal] = useState(false);
   const [hvStudentId, setHvStudentId] = useState("");
+  const [hvCategory, setHvCategory] = useState<string>("kat1");
   const [hvDate, setHvDate] = useState(new Date().toISOString().split("T")[0]);
   const [hvParentName, setHvParentName] = useState("");
   const [hvAddress, setHvAddress] = useState("");
   const [hvReason, setHvReason] = useState("");
   const [hvResult, setHvResult] = useState("");
   const [hvPhotos, setHvPhotos] = useState<string[]>([]);
+
+  // Kop Sekolah (School Letterhead) States synced with Profile settings
+  const [useKop, setUseKop] = useState<boolean>(() => {
+    const saved = safeStorage.getItem("guru_kop_enabled");
+    return saved === null ? true : saved === "true";
+  });
+  const [kopType, setKopType] = useState<"manual" | "image">(() => {
+    const saved = safeStorage.getItem("guru_kop_type");
+    return (saved === "manual" || saved === "image") ? saved : "manual";
+  });
+  const [kopManual, setKopManual] = useState(() => {
+    const saved = safeStorage.getItem("guru_kop_manual");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Failed to parse saved kop manual:", e);
+      }
+    }
+    return {
+      line1: "PEMERINTAH PROVINSI JAWA BARAT",
+      line2: "DINAS PENDIDIKAN",
+      line3: institution || "SMA NEGERI 2 TASIKMALAYA",
+      line4: "Jl. Ir. H. Juanda No. 93, Coblong, Kota Bandung | Telp: (022) 250123",
+      line5: "Website: www.sman2tasikmalaya.sch.id | Email: info@sman2tasikmalaya.sch.id"
+    };
+  });
+  const [kopImage, setKopImage] = useState<string>(() => {
+    return safeStorage.getItem("guru_kop_image") || "";
+  });
+  const [kopLogo, setKopLogo] = useState<string>(() => {
+    return safeStorage.getItem("guru_kop_logo") || "";
+  });
+  const [kopLogoPosition, setKopLogoPosition] = useState<"left" | "right" | "both" | "none">(() => {
+    return (safeStorage.getItem("guru_kop_logo_position") as any) || "left";
+  });
+  const [kopLogoSize, setKopLogoSize] = useState<number>(() => {
+    const saved = safeStorage.getItem("guru_kop_logo_size");
+    return saved ? parseInt(saved, 10) : 55;
+  });
+
+  // Listen to profile configuration changes
+  useEffect(() => {
+    const syncKopSettings = () => {
+      const enabled = safeStorage.getItem("guru_kop_enabled");
+      setUseKop(enabled === null ? true : enabled === "true");
+      
+      const type = safeStorage.getItem("guru_kop_type");
+      setKopType((type === "manual" || type === "image") ? type : "manual");
+      
+      const manual = safeStorage.getItem("guru_kop_manual");
+      if (manual) {
+        try {
+          setKopManual(JSON.parse(manual));
+        } catch (e) {
+          console.error("Failed to parse saved kop manual:", e);
+        }
+      }
+      
+      setKopImage(safeStorage.getItem("guru_kop_image") || "");
+      setKopLogo(safeStorage.getItem("guru_kop_logo") || "");
+      setKopLogoPosition((safeStorage.getItem("guru_kop_logo_position") as any) || "left");
+      
+      const logoSize = safeStorage.getItem("guru_kop_logo_size");
+      setKopLogoSize(logoSize ? parseInt(logoSize, 10) : 55);
+    };
+
+    window.addEventListener("storage", syncKopSettings);
+    // Custom event dispatch trigger
+    window.addEventListener("guru_kop_updated", syncKopSettings);
+    return () => {
+      window.removeEventListener("storage", syncKopSettings);
+      window.removeEventListener("guru_kop_updated", syncKopSettings);
+    };
+  }, []);
 
   // Preview Image Lightbox Modal State
   const [lightboxImg, setLightboxImg] = useState<string | null>(null);
@@ -101,23 +267,38 @@ export default function WaliKelas({
   }, [students, homeroomClass]);
 
   // Attendance for homeroom class filtered by month if selected
+  // Dates where ALL students are "Tidak Mengajar" (tanpa intervensi) are excluded from the recap
   const classAttendance = useMemo(() => {
-    return attendanceList.filter(a => {
+    const rawFiltered = attendanceList.filter(a => {
       if (a.className !== homeroomClass) return false;
+
+      // Semester filter
+      const m = parseInt(a.date.slice(5, 7));
+      const inSemester = selectedSemester === 1 ? (m >= 7 && m <= 12) : (m >= 1 && m <= 6);
+      if (!inSemester) return false;
+
       if (selectedMonth !== "all") {
-        const dateObj = new Date(a.date);
-        const monthStr = (dateObj.getMonth() + 1).toString().padStart(2, "0");
-        return monthStr === selectedMonth;
+        return a.date.slice(5, 7) === selectedMonth;
       }
       return true;
     });
-  }, [attendanceList, homeroomClass, selectedMonth]);
+
+    // Identify dates with at least one active attendance mark (Hadir, Sakit, Izin, Alpa)
+    const activeKbmDates = new Set<string>();
+    rawFiltered.forEach(a => {
+      if (a.status && a.status !== "Tidak Mengajar") {
+        activeKbmDates.add(a.date);
+      }
+    });
+
+    return rawFiltered.filter(a => activeKbmDates.has(a.date));
+  }, [attendanceList, homeroomClass, selectedMonth, selectedSemester]);
 
   // Student Attendance Summary
   const studentAttendanceSummary = useMemo(() => {
-    const map: Record<string, { hadir: number; sakit: number; izin: number; alpa: number; total: number; logs: Attendance[] }> = {};
+    const map: Record<string, { hadir: number; sakit: number; izin: number; alpa: number; tidakMengajar: number; total: number; logs: Attendance[] }> = {};
     classStudents.forEach(s => {
-      map[s.id] = { hadir: 0, sakit: 0, izin: 0, alpa: 0, total: 0, logs: [] };
+      map[s.id] = { hadir: 0, sakit: 0, izin: 0, alpa: 0, tidakMengajar: 0, total: 0, logs: [] };
     });
 
     classAttendance.forEach(a => {
@@ -128,6 +309,7 @@ export default function WaliKelas({
         else if (a.status === "Sakit") map[a.studentId].sakit += 1;
         else if (a.status === "Izin") map[a.studentId].izin += 1;
         else if (a.status === "Alpa") map[a.studentId].alpa += 1;
+        else if (a.status === "Tidak Mengajar") map[a.studentId].tidakMengajar += 1;
       }
     });
 
@@ -181,12 +363,26 @@ export default function WaliKelas({
       ? Math.round(academicScores.reduce((a, b) => a + b, 0) / academicScores.length)
       : 0;
 
-    // Students needing special attention (Alpa > 1 or score < 75 or has notes)
+    // Students needing special attention (Alpa >= 2, attendance < 85%, sakit > 3 consecutive or sakit >= 15 accumulative, or has notes)
     const alertStudents = classStudents.filter(s => {
       const att = studentAttendanceSummary[s.id];
-      const acad = studentAcademicSummary[s.id];
       const hasNote = notes.some(n => n.studentId === s.id);
-      return (att && att.alpa >= 2) || (acad && acad.finalAvg < 75 && acad.finalAvg > 0) || hasNote;
+      const lowAttendance = att && att.total > 0 && Math.round((att.hadir / att.total) * 100) < 85;
+
+      const sortedLogs = [...((att && att.logs) || [])].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      let maxConsSakit = 0;
+      let currConsSakit = 0;
+      sortedLogs.forEach(l => {
+        if (l.status === 'Sakit') {
+          currConsSakit += 1;
+          if (currConsSakit > maxConsSakit) maxConsSakit = currConsSakit;
+        } else {
+          currConsSakit = 0;
+        }
+      });
+      const highSakit = maxConsSakit > 3 || (att && att.sakit >= 15);
+
+      return (att && att.alpa >= 2) || lowAttendance || highSakit || hasNote;
     });
 
     return {
@@ -197,6 +393,169 @@ export default function WaliKelas({
       alertStudents
     };
   }, [classStudents, studentAttendanceSummary, studentAcademicSummary, notes]);
+
+  // Helper to build Kop Sekolah HTML block for printable reports
+  const getKopHeaderHtml = () => {
+    if (!useKop) {
+      return `
+        <div class="header" style="text-align: center; border-bottom: 3px double #000; padding-bottom: 10px; margin-bottom: 12px;">
+          <h2 style="margin: 0; font-size: 15px; font-weight: 800; text-transform: uppercase;">${institution.replace('\n', '<br>')}</h2>
+        </div>
+      `;
+    }
+
+    if (kopType === "image" && kopImage) {
+      return `
+        <div class="header" style="border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; text-align: center;">
+          <img src="${kopImage}" style="max-height: 95px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
+        </div>
+      `;
+    }
+
+    return `
+      <div class="header" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; min-height: 75px;">
+        <!-- Left Logo Column -->
+        <div style="width: 75px; text-align: left; display: ${kopLogo && (kopLogoPosition === 'left' || kopLogoPosition === 'both') ? 'block' : 'none'};">
+          <img src="${kopLogo}" style="max-height: ${kopLogoSize}px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
+        </div>
+        
+        <!-- Symmetric spacer if only right logo is active -->
+        <div style="width: 75px; display: ${kopLogo && kopLogoPosition === 'right' ? 'block' : 'none'};"></div>
+
+        <!-- Text Lines -->
+        <div style="flex-grow: 1; text-align: center; line-height: 1.25; padding: 0 10px;">
+          <div style="font-size: 11px; font-weight: bold; letter-spacing: 0.5px; margin: 0; text-transform: uppercase; color: #1e293b;">${kopManual.line1}</div>
+          <div style="font-size: 12px; font-weight: bold; letter-spacing: 0.5px; margin: 2px 0 0 0; text-transform: uppercase; color: #1e293b;">${kopManual.line2}</div>
+          <div style="font-size: 16px; font-weight: 800; letter-spacing: 1px; margin: 3px 0 0 0; color: #1e3a8a; text-transform: uppercase;">${kopManual.line3}</div>
+          <div style="font-size: 8.5px; color: #475569; margin: 4px 0 0 0; font-weight: 500;">${kopManual.line4}</div>
+          <div style="font-size: 8.5px; color: #475569; margin: 1px 0 0 0; font-style: italic; font-weight: 500;">${kopManual.line5}</div>
+        </div>
+
+        <!-- Right Logo Column -->
+        <div style="width: 75px; text-align: right; display: ${kopLogo && (kopLogoPosition === 'right' || kopLogoPosition === 'both') ? 'block' : 'none'};">
+          <img src="${kopLogo}" style="max-height: ${kopLogoSize}px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
+        </div>
+        
+        <!-- Symmetric spacer if only left logo is active -->
+        <div style="width: 75px; display: ${kopLogo && kopLogoPosition === 'left' ? 'block' : 'none'};"></div>
+      </div>
+    `;
+  };
+
+  // Automatic Detection of Students Meeting 4 Home Visit Criteria
+  const flaggedHomeVisitStudents = useMemo(() => {
+    return classStudents.map(student => {
+      const att = studentAttendanceSummary[student.id] || { hadir: 0, sakit: 0, izin: 0, alpa: 0, total: 0, logs: [] };
+      const rate = att.total > 0 ? Math.round((att.hadir / att.total) * 100) : 100;
+
+      const sortedLogs = [...(att.logs || [])].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      let maxConsAlpa = 0;
+      let currConsAlpa = 0;
+      let maxConsSakit = 0;
+      let currConsSakit = 0;
+
+      sortedLogs.forEach(l => {
+        if (l.status === 'Alpa') {
+          currConsAlpa += 1;
+          if (currConsAlpa > maxConsAlpa) maxConsAlpa = currConsAlpa;
+        } else {
+          currConsAlpa = 0;
+        }
+
+        if (l.status === 'Sakit') {
+          currConsSakit += 1;
+          if (currConsSakit > maxConsSakit) maxConsSakit = currConsSakit;
+        } else {
+          currConsSakit = 0;
+        }
+      });
+
+      const matchedCats: Array<{ id: string; code: string; title: string; shortLabel: string; badge: string; detail: string }> = [];
+
+      // Kategori 1: Alpa 3 hari berturut-turut ATAU 7 kali tidak berturut-turut
+      if (maxConsAlpa >= 3 || att.alpa >= 7) {
+        matchedCats.push({
+          id: "kat1",
+          code: "Kategori 1",
+          title: "Siswa alpa 3 hari berturut-turut atau 7 kali tidak berturut-turut",
+          shortLabel: "Alpa 3x Berturut / 7x Akumulasi",
+          badge: "bg-rose-50 text-rose-700 border border-rose-200 font-extrabold",
+          detail: maxConsAlpa >= 3 ? `Terdeteksi Alpa berturut-turut ${maxConsAlpa} hari.` : `Terhitung akumulasi Alpa ${att.alpa} kali.`
+        });
+      }
+
+      // Kategori 2: Sakit lebih dari 3 hari secara berturut-turut ATAU 15 hari tidak berturut-turut (akumulasi)
+      if (maxConsSakit > 3 || att.sakit >= 15) {
+        matchedCats.push({
+          id: "kat2",
+          code: "Kategori 2",
+          title: "Siswa sakit lebih dari 3 hari secara berturut-turut atau 15 hari tidak berturut-turut",
+          shortLabel: maxConsSakit > 3 ? "Sakit > 3 Hari Berturut" : "Sakit 15x Akumulasi",
+          badge: "bg-amber-50 text-amber-700 border border-amber-200 font-extrabold",
+          detail: maxConsSakit > 3
+            ? `Terdeteksi Sakit berturut-turut ${maxConsSakit} hari (> 3 hari).`
+            : `Terhitung akumulasi Sakit ${att.sakit} hari (mencapai batas 15 hari).`
+        });
+      }
+
+      // Kategori 3: Kehadiran keseluruhan < 85%
+      if (att.total > 0 && rate < 85) {
+        matchedCats.push({
+          id: "kat3",
+          code: "Kategori 3",
+          title: "Siswa yang memiliki tingkat kehadiran keseluruhan kurang dari 85%",
+          shortLabel: `Kehadiran ${rate}% (< 85%)`,
+          badge: "bg-orange-50 text-orange-700 border border-orange-200 font-extrabold",
+          detail: `Persentase kehadiran saat ini ${rate}% (di bawah ambang batas minimal 85%).`
+        });
+      }
+
+      // Kategori 4: Pembinaan khusus (catatan kenakalan remaja, penyalahgunaan narkoba, geng motor)
+      const stNotes = notes.filter(n => n.studentId === student.id);
+      const riskNotes = stNotes.filter(n => {
+        const text = (n.note + " " + n.category + " " + (n.actionTaken || "")).toLowerCase();
+        return text.includes("narkoba") || text.includes("geng") || text.includes("motor") || 
+               text.includes("kenakalan") || text.includes("tawuran") || text.includes("miras") || 
+               text.includes("rokok") || text.includes("sajam") || text.includes("kriminal");
+      });
+
+      if (riskNotes.length > 0) {
+        matchedCats.push({
+          id: "kat4",
+          code: "Kategori 4",
+          title: "Siswa yang dalam pembinaannya memiliki catatan kenakalan remaja, penyalahgunaan narkoba dan geng motor",
+          shortLabel: "Pembinaan Khusus",
+          badge: "bg-purple-50 text-purple-700 border border-purple-200 font-extrabold",
+          detail: `Memiliki ${riskNotes.length} catatan pembinaan khusus (kenakalan/narkoba/geng motor).`
+        });
+      }
+
+      return {
+        student,
+        matchedCats,
+        hasExistingVisit: homeVisits.some(hv => hv.studentId === student.id)
+      };
+    }).filter(item => item.matchedCats.length > 0);
+  }, [classStudents, studentAttendanceSummary, notes, homeVisits]);
+
+  // Trigger Home Visit modal with pre-filled category & student
+  const handleStartHomeVisitForStudent = (studentId: string, categoryId?: string, customReason?: string) => {
+    setHvStudentId(studentId);
+    const catId = categoryId || "kat1";
+    setHvCategory(catId);
+    
+    const catObj = HOME_VISIT_CATEGORIES.find(c => c.id === catId);
+    if (customReason) {
+      setHvReason(customReason);
+    } else if (catObj) {
+      setHvReason(catObj.template);
+    }
+    const st = classStudents.find(s => s.id === studentId);
+    if (st) {
+      setHvAddress(`Alamat tempat tinggal ${st.name}`);
+    }
+    setIsOpenHomeVisitModal(true);
+  };
 
   // Handle Photo Upload for Home Visit with Auto-compression
   const handlePhotoUpload = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -234,6 +593,7 @@ export default function WaliKelas({
       date: hvDate,
       parentName: hvParentName.trim(),
       address: hvAddress.trim() || "Alamat Tempat Tinggal Siswa",
+      category: hvCategory,
       reason: hvReason.trim(),
       result: hvResult.trim(),
       photos: hvPhotos,
@@ -248,6 +608,7 @@ export default function WaliKelas({
     setHvReason("");
     setHvResult("");
     setHvPhotos([]);
+    setHvCategory("kat1");
   };
 
   // Handle Note Submission
@@ -294,6 +655,103 @@ export default function WaliKelas({
     return homeVisits.filter(hv => hv.className === homeroomClass);
   }, [homeVisits, homeroomClass]);
 
+  // Export Preview Modal States
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [previewData, setPreviewData] = useState<any[]>([]);
+  const [previewColumns, setPreviewColumns] = useState<string[]>([]);
+
+  // Detailed Export Logic for Wali Kelas (Daily Matrix + Total Summary)
+  const getExportDetails = () => {
+    // classAttendance is already filtered to only active KBM / intervention dates
+    const uniqueDates = Array.from(new Set(classAttendance.map(a => a.date))).sort();
+
+    const studentRows = classStudents.map(student => {
+      const studentAttendance = classAttendance.filter(a => a.studentId === student.id);
+
+      const record: {
+        id: string;
+        nis: string;
+        name: string;
+        daily: Record<string, string>;
+        hadir: number;
+        sakit: number;
+        izin: number;
+        alpa: number;
+        tidakMengajar: number;
+        totalKbm: number;
+        percentage: string;
+      } = {
+        id: student.id,
+        nis: student.nis,
+        name: student.name,
+        daily: {},
+        hadir: 0,
+        sakit: 0,
+        izin: 0,
+        alpa: 0,
+        tidakMengajar: 0,
+        totalKbm: 0,
+        percentage: "0%"
+      };
+
+      uniqueDates.forEach(date => {
+        const entry = studentAttendance.find(a => a.date === date);
+        const st = entry ? entry.status : "-";
+        record.daily[date] = st;
+
+        if (st === "Hadir") record.hadir++;
+        else if (st === "Sakit") record.sakit++;
+        else if (st === "Izin") record.izin++;
+        else if (st === "Alpa") record.alpa++;
+        else if (st === "Tidak Mengajar") record.tidakMengajar++;
+      });
+
+      record.totalKbm = record.hadir + record.sakit + record.izin + record.alpa;
+      const rate = record.totalKbm > 0 
+        ? Math.round((record.hadir / record.totalKbm) * 100) 
+        : 100;
+      record.percentage = `${rate}%`;
+
+      return record;
+    });
+
+    return { uniqueDates, studentRows };
+  };
+
+  const getExportData = () => {
+    const { uniqueDates, studentRows } = getExportDetails();
+
+    return studentRows.map(s => {
+      const row: Record<string, any> = {
+        NIS: s.nis || "-",
+        Nama: s.name || "-",
+      };
+
+      uniqueDates.forEach(d => {
+        const parts = d.split("-");
+        const shortDate = parts.length === 3 ? `${parts[2]}/${parts[1]}` : d;
+        const st = s.daily[d];
+        let symbol = "-";
+        if (st === "Hadir") symbol = "H";
+        else if (st === "Sakit") symbol = "S";
+        else if (st === "Izin") symbol = "I";
+        else if (st === "Alpa") symbol = "A";
+        else if (st === "Tidak Mengajar") symbol = "TM";
+        row[shortDate] = symbol;
+      });
+
+      row["Hadir (H)"] = s.hadir;
+      row["Sakit (S)"] = s.sakit;
+      row["Izin (I)"] = s.izin;
+      row["Alpa (A)"] = s.alpa;
+      row["Tdk Mengajar (TM)"] = s.tidakMengajar;
+      row["Total KBM"] = s.totalKbm;
+      row["% Kehadiran"] = s.percentage;
+
+      return row;
+    });
+  };
+
   // PRINT REKAP KEHADIRAN (Attendance Summary Printable)
   const handlePrintAttendanceRecap = () => {
     const printWindow = window.open("", "_blank");
@@ -303,82 +761,150 @@ export default function WaliKelas({
     }
 
     const monthLabel = selectedMonth === "all" ? "Keseluruhan Semester" : `Bulan ${selectedMonth}`;
+    const { uniqueDates, studentRows } = getExportDetails();
+    const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
 
     const html = `
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Rekapitulasi Presensi Siswa Kelas ${homeroomClass}</title>
+        <title>Rekapitulasi Presensi Detail & Total Kelas ${homeroomClass}</title>
         <style>
-          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 25px; color: #0f172a; line-height: 1.4; }
-          .header { text-align: center; border-bottom: 3px double #000; padding-bottom: 12px; margin-bottom: 18px; }
-          .header h2 { margin: 0; font-size: 16px; text-transform: uppercase; letter-spacing: 0.5px; }
-          .header h3 { margin: 4px 0 0 0; font-size: 15px; color: #1e293b; }
-          .header p { margin: 2px 0 0 0; font-size: 11px; color: #475569; }
-          .meta-box { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 15px; background: #f8fafc; padding: 8px 12px; border-radius: 6px; border: 1px solid #e2e8f0; }
-          table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; }
-          th, td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; }
-          th { background: #f1f5f9; font-weight: bold; text-transform: uppercase; font-size: 10px; }
+          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; color: #0f172a; line-height: 1.3; }
+          .header { text-align: center; border-bottom: 3px double #000; padding-bottom: 10px; margin-bottom: 12px; }
+          .header h2 { margin: 0; font-size: 15px; font-weight: 800; text-transform: uppercase; }
+          .header h3 { margin: 3px 0 0 0; font-size: 13px; font-weight: 700; }
+          .header p { margin: 2px 0 0 0; font-size: 10px; color: #475569; }
+          .meta-box { display: flex; justify-content: space-between; font-size: 10px; margin-bottom: 15px; background: #f8fafc; padding: 8px 12px; border-radius: 6px; border: 1px solid #e2e8f0; }
+          
+          .section-title { font-size: 11px; font-weight: bold; text-transform: uppercase; margin-top: 18px; margin-bottom: 6px; color: #1e293b; border-left: 3px solid #4f46e5; padding-left: 8px; }
+          
+          table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 10px; }
+          th, td { border: 1px solid #cbd5e1; padding: 5px 6px; text-align: left; }
+          th { background: #f1f5f9; font-weight: bold; text-transform: uppercase; font-size: 9px; text-align: center; }
           .text-center { text-align: center; }
-          .signatures { display: flex; justify-content: space-between; margin-top: 40px; font-size: 11px; text-align: center; }
-          .sig-box { margin-top: 55px; font-weight: bold; }
+          
+          .badge-h { color: #059669; font-weight: bold; }
+          .badge-s { color: #d97706; font-weight: bold; }
+          .badge-i { color: #2563eb; font-weight: bold; }
+          .badge-a { color: #dc2626; font-weight: bold; }
+          .badge-tm { color: #64748b; font-weight: bold; }
+
+          .legend { font-size: 9px; color: #64748b; margin-top: 6px; background: #f8fafc; padding: 6px 10px; border-radius: 4px; border: 1px solid #e2e8f0; display: flex; gap: 12px; }
+
+          .signatures { display: flex; justify-content: space-between; margin-top: 35px; font-size: 10px; text-align: center; page-break-inside: avoid; }
+          .sig-box { margin-top: 50px; font-weight: bold; }
           @media print { body { padding: 0; } }
         </style>
       </head>
       <body>
-        <div class="header">
-          <h2>${institution.replace('\n', '<br>')}</h2>
-          <h3>REKAPITULASI PRESENSI KEHADIRAN SISWA</h3>
-          <p>Periode: ${monthLabel} • Tahun Ajaran 2025/2026</p>
+        ${getKopHeaderHtml()}
+
+        <div style="text-align: center; margin-bottom: 15px;">
+          <h2 style="margin: 0; font-size: 14px; font-weight: 800; text-transform: uppercase; color: #1e293b;">REKAPITULASI PRESENSI KEHADIRAN SISWA</h2>
+          <p style="margin: 3px 0 0 0; font-size: 10px; color: #475569; font-weight: 500;">Periode: ${monthLabel} • Tahun Ajaran 2025/2026</p>
         </div>
 
         <div class="meta-box">
-          <div><strong>Kelas:</strong> ${homeroomClass}</div>
+          <div><strong>Kelas:</strong> Wali Kelas ${homeroomClass}</div>
           <div><strong>Wali Kelas:</strong> ${teacherName} (NIP. ${nip || '-'})</div>
-          <div><strong>Tanggal Cetak:</strong> ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</div>
+          <div><strong>Tanggal Cetak:</strong> ${dateStr}</div>
         </div>
 
+        <!-- BAGIAN 1: DETAIL TANGGAL PERTEMUAN -->
+        <div class="section-title">Bagian 1: Detail Kehadiran Per Hari / Pertemuan</div>
         <table>
           <thead>
             <tr>
-              <th width="5%" class="text-center">No</th>
-              <th width="30%">Nama Siswa</th>
-              <th width="15%">NIS</th>
-              <th width="10%" class="text-center">Hadir</th>
-              <th width="10%" class="text-center">Sakit</th>
-              <th width="10%" class="text-center">Izin</th>
-              <th width="10%" class="text-center">Alpa</th>
-              <th width="10%" class="text-center">Persentase</th>
+              <th width="4%">No</th>
+              <th width="10%">NIS</th>
+              <th width="24%">Nama Siswa</th>
+              ${uniqueDates.map(d => {
+                const parts = d.split("-");
+                const shortDate = parts.length === 3 ? `${parts[2]}/${parts[1]}` : d;
+                return `<th>${shortDate}</th>`;
+              }).join('')}
             </tr>
           </thead>
           <tbody>
-            ${classStudents.map((s, idx) => {
-              const att = studentAttendanceSummary[s.id] || { hadir: 0, sakit: 0, izin: 0, alpa: 0, total: 0 };
-              const rate = att.total > 0 ? Math.round((att.hadir / att.total) * 100) : 100;
-              return `
-                <tr>
-                  <td class="text-center">${idx + 1}</td>
-                  <td><strong>${s.name}</strong></td>
-                  <td>${s.nis}</td>
-                  <td class="text-center">${att.hadir}</td>
-                  <td class="text-center">${att.sakit}</td>
-                  <td class="text-center">${att.izin}</td>
-                  <td class="text-center" style="color: ${att.alpa > 0 ? '#e11d48' : '#000'}; font-weight: ${att.alpa > 0 ? 'bold' : 'normal'};">${att.alpa}</td>
-                  <td class="text-center" style="font-weight: bold; color: ${rate < 80 ? '#e11d48' : '#0f172a'};">${rate}%</td>
-                </tr>
-              `;
-            }).join('')}
+            ${studentRows.map((s, idx) => `
+              <tr>
+                <td class="text-center">${idx + 1}</td>
+                <td>${s.nis || '-'}</td>
+                <td><strong>${s.name || '-'}</strong></td>
+                ${uniqueDates.map(d => {
+                  const st = s.daily[d];
+                  if (st === "Hadir") return `<td class="text-center badge-h">H</td>`;
+                  if (st === "Sakit") return `<td class="text-center badge-s">S</td>`;
+                  if (st === "Izin") return `<td class="text-center badge-i">I</td>`;
+                  if (st === "Alpa") return `<td class="text-center badge-a">A</td>`;
+                  if (st === "Tidak Mengajar") return `<td class="text-center badge-tm">TM</td>`;
+                  return `<td class="text-center" style="color:#94a3b8;">-</td>`;
+                }).join('')}
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+
+        <div class="legend">
+          <div><strong>Keterangan Kode Status:</strong></div>
+          <div><span class="badge-h">H</span> = Hadir</div>
+          <div><span class="badge-s">S</span> = Sakit</div>
+          <div><span class="badge-i">I</span> = Izin</div>
+          <div><span class="badge-a">A</span> = Alpa</div>
+          <div><span class="badge-tm">TM</span> = Tidak Mengajar / Libur KBM</div>
+        </div>
+
+        <!-- BAGIAN 2: REKAPITULASI KESELURUHNA -->
+        <div class="section-title">Bagian 2: Rekapitulasi Keseluruhan (Ringkasan Akhir)</div>
+        <table>
+          <thead>
+            <tr>
+              <th width="4%">No</th>
+              <th width="12%">NIS</th>
+              <th width="28%">Nama Siswa</th>
+              <th width="8%">Hadir (H)</th>
+              <th width="8%">Sakit (S)</th>
+              <th width="8%">Izin (I)</th>
+              <th width="8%">Alpa (A)</th>
+              <th width="10%">Tdk Mengajar</th>
+              <th width="10%">Total KBM</th>
+              <th width="12%">% Kehadiran</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${studentRows.map((s, idx) => `
+              <tr>
+                <td class="text-center">${idx + 1}</td>
+                <td>${s.nis || '-'}</td>
+                <td><strong>${s.name || '-'}</strong></td>
+                <td class="text-center badge-h">${s.hadir}</td>
+                <td class="text-center badge-s">${s.sakit}</td>
+                <td class="text-center badge-i">${s.izin}</td>
+                <td class="text-center badge-a">${s.alpa}</td>
+                <td class="text-center badge-tm">${s.tidakMengajar}</td>
+                <td class="text-center font-bold">${s.totalKbm}</td>
+                <td class="text-center font-bold">${s.percentage}</td>
+              </tr>
+            `).join('')}
           </tbody>
         </table>
 
         <div class="signatures">
           <div>
             <p>Mengetahui,<br>Kepala Sekolah</p>
-            <div class="sig-box">( ................................................. )<br><span style="font-weight: normal; font-size: 10px;">NIP. -</span></div>
+            <div class="sig-box">
+              ${headmasterName || '( ................................................. )'}
+              <br><span style="font-weight: normal; font-size: 9px;">NIP. ${headmasterNip || '-'}</span>
+              ${headmasterRank ? `<br><span style="font-weight: normal; font-size: 8px; color: #475569;">${headmasterRank}</span>` : ''}
+            </div>
           </div>
           <div>
-            <p>Tasikmalaya, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}<br>Wali Kelas ${homeroomClass}</p>
-            <div class="sig-box">${teacherName}<br><span style="font-weight: normal; font-size: 10px;">NIP. ${nip || '-'}</span></div>
+            <p>${documentCity}, ${dateStr}<br>Wali Kelas ${homeroomClass}</p>
+            <div class="sig-box">
+              ${teacherName}
+              <br><span style="font-weight: normal; font-size: 9px;">NIP. ${nip || '-'}</span>
+            </div>
           </div>
         </div>
       </body>
@@ -390,6 +916,392 @@ export default function WaliKelas({
     setTimeout(() => {
       printWindow.print();
     }, 400);
+  };
+
+  const handlePrintFullReport = () => {
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      alert("Gagal membuka jendela cetak. Izinkan pop-up di peramban Anda.");
+      return;
+    }
+
+    const { studentRows } = getExportDetails();
+    const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+    const monthLabel = selectedMonth === "all" ? "Keseluruhan Semester" : `Bulan ${selectedMonth}`;
+    
+    // 1. Catatan Pembinaan
+    const stNotes = notes.filter(n => {
+      if (n.className !== homeroomClass) return false;
+      if (selectedMonth !== "all") {
+        const m = n.date.split("-")[1];
+        if (m !== selectedMonth) return false;
+      }
+      return true;
+    });
+
+    // 2. Home Visit
+    const stVisits = classHomeVisits.filter(hv => {
+      if (selectedMonth !== "all") {
+        const m = hv.date.split("-")[1];
+        if (m !== selectedMonth) return false;
+      }
+      return true;
+    });
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Laporan Lengkap Wali Kelas - ${homeroomClass} (${monthLabel})</title>
+        <style>
+          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; color: #0f172a; line-height: 1.4; }
+          .header { text-align: center; border-bottom: 3px double #000; padding-bottom: 12px; margin-bottom: 20px; }
+          .header h2 { margin: 0; font-size: 16px; font-weight: 800; text-transform: uppercase; }
+          .header h3 { margin: 4px 0 0 0; font-size: 14px; font-weight: 700; }
+          .header p { margin: 4px 0 0 0; font-size: 11px; color: #475569; }
+          
+          .meta-box { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 20px; background: #f8fafc; padding: 10px 15px; border-radius: 6px; border: 1px solid #e2e8f0; }
+          
+          .section-title { font-size: 12px; font-weight: bold; text-transform: uppercase; margin-top: 25px; margin-bottom: 10px; color: #1e293b; border-left: 4px solid #4f46e5; padding-left: 10px; background: #f1f5f9; padding-top: 4px; padding-bottom: 4px; }
+          
+          table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 11px; page-break-inside: auto; }
+          tr { page-break-inside: avoid; page-break-after: auto; }
+          th, td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; vertical-align: top; }
+          th { background: #f8fafc; font-weight: bold; text-transform: uppercase; font-size: 10px; text-align: center; }
+          .text-center { text-align: center; }
+          
+          .signatures { display: flex; justify-content: space-between; margin-top: 40px; font-size: 11px; text-align: center; page-break-inside: avoid; }
+          .sig-box { margin-top: 60px; font-weight: bold; }
+          
+          .empty-state { text-align: center; font-style: italic; color: #64748b; padding: 15px; border: 1px dashed #cbd5e1; font-size: 11px; }
+
+          @media print { 
+            body { padding: 0; }
+            .page-break { page-break-before: always; }
+          }
+        </style>
+      </head>
+      <body>
+        ${getKopHeaderHtml()}
+
+        <div style="text-align: center; margin-bottom: 20px;">
+          <h2 style="margin: 0; font-size: 15px; font-weight: 800; text-transform: uppercase; color: #1e293b;">LAPORAN PELAKSANAAN TUGAS WALI KELAS</h2>
+          <p style="margin: 3px 0 0 0; font-size: 11px; color: #475569; font-weight: 500;">Periode: <strong>${monthLabel}</strong></p>
+        </div>
+
+        <div class="meta-box">
+          <div><strong>Kelas Binaan:</strong> ${homeroomClass}</div>
+          <div><strong>Wali Kelas:</strong> ${teacherName} (NIP. ${nip || '-'})</div>
+          <div><strong>Tanggal Cetak:</strong> ${dateStr}</div>
+        </div>
+
+        <!-- BAGIAN 1: REKAPITULASI PRESENSI -->
+        <div class="section-title">Bagian 1: Rekapitulasi Presensi Kehadiran Siswa</div>
+        <table>
+          <thead>
+            <tr>
+              <th width="5%">No</th>
+              <th width="12%">NIS</th>
+              <th width="33%">Nama Siswa</th>
+              <th width="8%">Hadir</th>
+              <th width="8%">Sakit</th>
+              <th width="8%">Izin</th>
+              <th width="8%">Alpa</th>
+              <th width="8%">Total</th>
+              <th width="10%">Persentase</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${studentRows.map((s, idx) => `
+              <tr>
+                <td class="text-center">${idx + 1}</td>
+                <td class="text-center">${s.nis || '-'}</td>
+                <td><strong>${s.name || '-'}</strong></td>
+                <td class="text-center">${s.hadir}</td>
+                <td class="text-center">${s.sakit}</td>
+                <td class="text-center">${s.izin}</td>
+                <td class="text-center">${s.alpa}</td>
+                <td class="text-center">${s.totalKbm}</td>
+                <td class="text-center font-bold">${s.percentage}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+
+        <!-- BAGIAN 2: CATATAN PEMBINAAN -->
+        <div class="section-title">Bagian 2: Catatan Pembinaan & Penanganan Siswa</div>
+        ${stNotes.length > 0 ? `
+          <table>
+            <thead>
+              <tr>
+                <th width="12%">Tanggal</th>
+                <th width="20%">Nama Siswa</th>
+                <th width="15%">Kategori</th>
+                <th width="28%">Permasalahan / Catatan</th>
+                <th width="25%">Tindak Lanjut / Solusi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${stNotes.map(n => `
+                <tr>
+                  <td class="text-center">${n.date}</td>
+                  <td><strong>${n.studentName}</strong></td>
+                  <td class="text-center">${n.category}</td>
+                  <td>${n.note}</td>
+                  <td>${n.actionTaken}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : '<div class="empty-state">Tidak ada catatan pembinaan siswa pada periode ini.</div>'}
+
+        <!-- BAGIAN 3: HOME VISIT -->
+        <div class="section-title">Bagian 3: Pelaksanaan Kunjungan Rumah (Home Visit)</div>
+        ${stVisits.length > 0 ? `
+          <table>
+            <thead>
+              <tr>
+                <th width="12%">Tanggal</th>
+                <th width="20%">Nama Siswa</th>
+                <th width="30%">Tujuan / Latar Belakang</th>
+                <th width="38%">Hasil Kunjungan & Kesepakatan</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${stVisits.map(hv => `
+                <tr>
+                  <td class="text-center">${hv.date}</td>
+                  <td><strong>${hv.studentName}</strong></td>
+                  <td>${hv.reason}</td>
+                  <td>${hv.result}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        ` : '<div class="empty-state">Tidak ada pelaksanaan Home Visit pada periode ini.</div>'}
+
+        <div class="signatures">
+          <div>
+            <p>Mengetahui,<br>Kepala Sekolah</p>
+            <div class="sig-box">
+              ${headmasterName || '( ................................................. )'}
+              <br><span style="font-weight: normal; font-size: 10px;">NIP. ${headmasterNip || '-'}</span>
+            </div>
+          </div>
+          <div>
+            <p>${documentCity}, ${dateStr}<br>Wali Kelas ${homeroomClass}</p>
+            <div class="sig-box">
+              ${teacherName}
+              <br><span style="font-weight: normal; font-size: 10px;">NIP. ${nip || '-'}</span>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    printWindow.document.write(html);
+    printWindow.document.close();
+    setTimeout(() => {
+      printWindow.print();
+    }, 500);
+  };
+
+  const handleExport = (type: "xlsx" | "pdf" | "print") => {
+    const { uniqueDates, studentRows } = getExportDetails();
+
+    if (type === "xlsx") {
+      const workbook = utils.book_new();
+
+      // Sheet 1: Detail Harian
+      const detailSheetData = studentRows.map((s, idx) => {
+        const rowObj: Record<string, any> = {
+          "No": idx + 1,
+          "NIS": s.nis || "-",
+          "Nama Siswa": s.name || "-",
+        };
+        uniqueDates.forEach(d => {
+          const parts = d.split("-");
+          const shortDate = parts.length === 3 ? `${parts[2]}/${parts[1]}` : d;
+          const st = s.daily[d];
+          let symbol = "-";
+          if (st === "Hadir") symbol = "H";
+          else if (st === "Sakit") symbol = "S";
+          else if (st === "Izin") symbol = "I";
+          else if (st === "Alpa") symbol = "A";
+          else if (st === "Tidak Mengajar") symbol = "TM";
+          rowObj[shortDate] = symbol;
+        });
+        return rowObj;
+      });
+      const wsDetail = utils.json_to_sheet(detailSheetData);
+      utils.book_append_sheet(workbook, wsDetail, "Detail Harian");
+
+      // Sheet 2: Rekap Keseluruhan
+      const summarySheetData = studentRows.map((s, idx) => ({
+        "No": idx + 1,
+        "NIS": s.nis || "-",
+        "Nama Siswa": s.name || "-",
+        "Hadir (H)": s.hadir,
+        "Sakit (S)": s.sakit,
+        "Izin (I)": s.izin,
+        "Alpa (A)": s.alpa,
+        "Tidak Mengajar (TM)": s.tidakMengajar,
+        "Total KBM": s.totalKbm,
+        "Persentase Kehadiran": s.percentage
+      }));
+      const wsSummary = utils.json_to_sheet(summarySheetData);
+      utils.book_append_sheet(workbook, wsSummary, "Rekap Keseluruhan");
+
+      writeFile(workbook, `Rekap_Presensi_WaliKelas_${homeroomClass}_${selectedMonth === "all" ? "Keseluruhan" : selectedMonth}.xlsx`);
+    } else if (type === "pdf") {
+      try {
+        const jsPDFConstructor = (jspdfModule as any).jsPDF || (jspdfModule as any).default?.jsPDF || (jspdfModule as any).default || jspdfModule;
+        const doc = new jsPDFConstructor({ orientation: "landscape", unit: "mm", format: "a4" });
+        const tableFn = typeof autoTable === 'function' ? autoTable : (autoTable as any).default;
+
+        const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+
+        // Header
+        doc.setFontSize(13);
+        doc.setFont("helvetica", "bold");
+        doc.text(`REKAPITULASI PRESENSI WALI KELAS - KELAS ${homeroomClass}`, 14, 15);
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "normal");
+        doc.text(`Periode: ${selectedMonth === "all" ? "Keseluruhan Semester" : `Bulan ${selectedMonth}`} | Tanggal Cetak: ${dateStr}`, 14, 21);
+        doc.text(`Wali Kelas: ${teacherName} (NIP. ${nip || "-"})`, 14, 26);
+
+        // Section 1: Detail Harian
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "bold");
+        doc.text("BAGIAN 1: DETAIL KEHADIRAN PER HARI / PERTEMUAN", 14, 33);
+
+        const dateHeaders = uniqueDates.map(d => {
+          const parts = d.split("-");
+          return parts.length === 3 ? `${parts[2]}/${parts[1]}` : d;
+        });
+
+        const detailHead = [["No", "NIS", "Nama Siswa", ...dateHeaders]];
+        const detailBody = studentRows.map((s, idx) => {
+          const rowVals = uniqueDates.map(d => {
+            const st = s.daily[d];
+            if (st === "Hadir") return "H";
+            if (st === "Sakit") return "S";
+            if (st === "Izin") return "I";
+            if (st === "Alpa") return "A";
+            if (st === "Tidak Mengajar") return "TM";
+            return "-";
+          });
+          return [idx + 1, s.nis || "-", s.name || "-", ...rowVals];
+        });
+
+        if (typeof tableFn === 'function') {
+          tableFn(doc, {
+            head: detailHead,
+            body: detailBody,
+            startY: 36,
+            styles: { fontSize: 8, cellPadding: 1.5, halign: 'center' },
+            headStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold', halign: 'center' },
+            columnStyles: {
+              0: { cellWidth: 10, halign: 'center' },
+              1: { cellWidth: 22, halign: 'left' },
+              2: { cellWidth: 45, halign: 'left' },
+            },
+            theme: 'grid'
+          });
+        }
+
+        let lastY1 = (doc as any).lastAutoTable ? (doc as any).lastAutoTable.finalY + 5 : 90;
+        doc.setFontSize(8);
+        doc.setFont("helvetica", "italic");
+        doc.text("Keterangan Kode: H = Hadir, S = Sakit, I = Izin, A = Alpa, TM = Tidak Mengajar / Libur KBM", 14, lastY1);
+
+        // Section 2: Rekapitulasi Keseluruhan
+        let startY2 = lastY1 + 8;
+        if (startY2 > 150) {
+          doc.addPage();
+          startY2 = 15;
+        }
+
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "bold");
+        doc.text("BAGIAN 2: REKAPITULASI KESELURUHAN (RINGKASAN AKHIR)", 14, startY2);
+
+        const summaryHead = [["No", "NIS", "Nama Siswa", "Hadir (H)", "Sakit (S)", "Izin (I)", "Alpa (A)", "Tdk Mengajar (TM)", "Total KBM", "% Kehadiran"]];
+        const summaryBody = studentRows.map((s, idx) => [
+          idx + 1,
+          s.nis || "-",
+          s.name || "-",
+          s.hadir,
+          s.sakit,
+          s.izin,
+          s.alpa,
+          s.tidakMengajar,
+          s.totalKbm,
+          s.percentage
+        ]);
+
+        if (typeof tableFn === 'function') {
+          tableFn(doc, {
+            head: summaryHead,
+            body: summaryBody,
+            startY: startY2 + 3,
+            styles: { fontSize: 8, cellPadding: 2, halign: 'center' },
+            headStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold', halign: 'center' },
+            columnStyles: {
+              0: { cellWidth: 10, halign: 'center' },
+              1: { cellWidth: 25, halign: 'left' },
+              2: { cellWidth: 55, halign: 'left' },
+            },
+            theme: 'grid'
+          });
+        }
+
+        let lastY2 = (doc as any).lastAutoTable ? (doc as any).lastAutoTable.finalY + 12 : 140;
+        if (lastY2 > 165) {
+          doc.addPage();
+          lastY2 = 20;
+        }
+
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "normal");
+        
+        // Left signature
+        doc.text("Mengetahui,", 30, lastY2);
+        doc.text("Kepala Sekolah", 30, lastY2 + 5);
+        doc.setFont("helvetica", "bold");
+        doc.text(headmasterName || "( ................................................. )", 30, lastY2 + 22);
+        doc.setFont("helvetica", "normal");
+        doc.text(`NIP. ${headmasterNip || "-"}`, 30, lastY2 + 27);
+
+        // Right signature
+        doc.text(`${documentCity}, ${dateStr}`, 200, lastY2);
+        doc.text(`Wali Kelas ${homeroomClass}`, 200, lastY2 + 5);
+        doc.setFont("helvetica", "bold");
+        doc.text(teacherName || "( ................................................. )", 200, lastY2 + 22);
+        doc.setFont("helvetica", "normal");
+        doc.text(`NIP. ${nip || "-"}`, 200, lastY2 + 27);
+
+        doc.save(`Rekap_Presensi_WaliKelas_${homeroomClass}.pdf`);
+      } catch (err) {
+        console.error("PDF generation error:", err);
+        handlePrintAttendanceRecap();
+      }
+    } else {
+      handlePrintAttendanceRecap();
+    }
+    setIsPreviewOpen(false);
+  };
+
+  const initiateExport = () => {
+    const { uniqueDates } = getExportDetails();
+    const dateCols = uniqueDates.map(d => {
+      const parts = d.split("-");
+      return parts.length === 3 ? `${parts[2]}/${parts[1]}` : d;
+    });
+    setPreviewColumns(["NIS", "Nama", ...dateCols, "Hadir (H)", "Sakit (S)", "Izin (I)", "Alpa (A)", "Tdk Mengajar (TM)", "Total KBM", "% Kehadiran"]);
+    setPreviewData(getExportData());
+    setIsPreviewOpen(true);
   };
 
   // PRINT HOME VISIT REPORT
@@ -426,10 +1338,7 @@ export default function WaliKelas({
         </style>
       </head>
       <body>
-        <div class="header">
-          <h2>${institution.replace('\n', '<br>')}</h2>
-          <p>Alamat Instansi & Sekolah Terdaftar • Layanan Bimbingan & Kewalikelasan</p>
-        </div>
+        ${getKopHeaderHtml()}
 
         <div class="title-tag">LAPORAN KUNJUNGAN RUMAH (HOME VISIT)</div>
 
@@ -465,11 +1374,11 @@ export default function WaliKelas({
             <div class="sig-box">${visit.parentName}</div>
           </div>
           <div>
-            <p>Guru BK / Pengembang</p>
-            <div class="sig-box">( ........................................ )</div>
+            <p>Mengetahui,<br>Kepala Sekolah</p>
+            <div class="sig-box">${headmasterName || '( ........................................ )'}<br><span style="font-weight: normal; font-size: 10px;">NIP. ${headmasterNip || '-'}</span></div>
           </div>
           <div>
-            <p>Tasikmalaya, ${visit.date}<br>Wali Kelas ${visit.className}</p>
+            <p>${documentCity}, ${visit.date}<br>Wali Kelas ${visit.className}</p>
             <div class="sig-box">${teacherName}<br><span style="font-weight: normal; font-size: 10px;">NIP. ${nip || '-'}</span></div>
           </div>
         </div>
@@ -520,10 +1429,11 @@ export default function WaliKelas({
         </style>
       </head>
       <body>
-        <div class="header">
-          <h2>${institution.replace('\n', '<br>')}</h2>
-          <h3>RAPOR RINGKAS & PERKEMBANGAN SISWA</h3>
-          <p>Tahun Ajaran 2025/2026 • Semester Genap</p>
+        ${getKopHeaderHtml()}
+
+        <div style="text-align: center; margin-bottom: 20px;">
+          <h2 style="margin: 0; font-size: 15px; font-weight: 800; text-transform: uppercase; color: #1e293b;">RAPOR RINGKAS & PERKEMBANGAN SISWA</h2>
+          <p style="margin: 3px 0 0 0; font-size: 11px; color: #475569; font-weight: 500;">Tahun Ajaran 2025/2026 • Semester Genap</p>
         </div>
 
         <div class="meta-grid">
@@ -607,13 +1517,17 @@ export default function WaliKelas({
           </table>
         ` : '<p style="font-style: italic; color: #64748b; font-size: 12px;">Siswa berperilaku baik dan tidak memiliki catatan pembinaan khusus.</p>'}
 
-        <div class="signatures">
+        <div class="signatures" style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px;">
           <div>
             <p>Orang Tua / Wali Murid</p>
             <div class="sig-box">( ................................................. )</div>
           </div>
           <div>
-            <p>Tasikmalaya, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}<br>Wali Kelas ${student.className}</p>
+            <p>Mengetahui,<br>Kepala Sekolah</p>
+            <div class="sig-box">${headmasterName || '( ................................................. )'}<br><span style="font-weight: normal; font-size: 11px;">NIP. ${headmasterNip || '-'}</span></div>
+          </div>
+          <div>
+            <p>${documentCity}, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}<br>Wali Kelas ${student.className}</p>
             <div class="sig-box">${teacherName}<br><span style="font-weight: normal; font-size: 11px;">NIP. ${nip || '-'}</span></div>
           </div>
         </div>
@@ -626,6 +1540,115 @@ export default function WaliKelas({
     setTimeout(() => {
       printWindow.print();
     }, 400);
+  };
+
+  const handleDownloadProfileTemplate = () => {
+    const templateData = [
+      {
+        "NIS": "12345",
+        "Nama": "Budi Santoso",
+        "Jenis Kelamin": "L",
+        "Tempat Lahir": "Jakarta",
+        "Tanggal Lahir": "12 Januari 2008",
+        "Agama": "Islam",
+        "Alamat": "Jl. Pendidikan No. 1",
+        "No HP Siswa": "081234567890",
+        "Nama Orang Tua": "Sutrisno",
+        "No Telepon Orang Tua": "089876543210",
+        "Link Foto": "https://drive.google.com/file/d/xxxxx/view"
+      }
+    ];
+    const ws = utils.json_to_sheet(templateData);
+    const wb = utils.book_new();
+    utils.book_append_sheet(wb, ws, "Template_Profil");
+    writeFile(wb, `Template_Profil_Siswa_${homeroomClass}.xlsx`);
+  };
+
+  const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const wb = read(bstr, { type: 'binary' });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const data = utils.sheet_to_json(ws);
+        
+        let updatedStudents = [...students];
+        let changesMade = 0;
+
+        data.forEach((row: any) => {
+          // Identify student by NIS or Name
+          const nis = row['NIS'] || row['nis'] || '';
+          const nama = row['Nama'] || row['nama'] || row['Nama Siswa'] || '';
+          
+          let studentIndex = -1;
+          if (nis) studentIndex = updatedStudents.findIndex(s => s.nis === String(nis));
+          if (studentIndex === -1 && nama) studentIndex = updatedStudents.findIndex(s => s.name.toLowerCase() === String(nama).toLowerCase());
+          
+          if (studentIndex !== -1) {
+            const st = updatedStudents[studentIndex];
+            
+            // Extract Drive Link to Photo URL
+            const photoLink = row['Link Foto'] || row['link foto'] || row['Link Foto Drive'] || row['Foto'] || row['foto'] || row['URL Foto'] || row['url foto'] || row['Foto Profil'];
+            let finalPhoto = st.photo;
+            if (photoLink && typeof photoLink === 'string' && photoLink.trim()) {
+              finalPhoto = formatDriveImageUrl(photoLink.trim());
+            }
+            
+            let parsedDateOfBirth = row['Tanggal Lahir'] || st.dateOfBirth;
+            if (typeof parsedDateOfBirth === 'number') {
+              const dateObj = new Date(Math.round((parsedDateOfBirth - 25569) * 86400 * 1000));
+              const y = dateObj.getUTCFullYear();
+              const m = String(dateObj.getUTCMonth() + 1).padStart(2, '0');
+              const d = String(dateObj.getUTCDate()).padStart(2, '0');
+              parsedDateOfBirth = `${y}-${m}-${d}`;
+            } else if (typeof parsedDateOfBirth === 'string' && parsedDateOfBirth.includes('/')) {
+               const parts = parsedDateOfBirth.split('/');
+               if (parts.length === 3) {
+                 let year = parts[2];
+                 if (year.length === 2) {
+                   // Handle yy format (assume 20xx for students, or 19xx if > 50)
+                   year = parseInt(year) > 50 ? '19' + year : '20' + year;
+                 }
+                 if (year.length === 4) {
+                   parsedDateOfBirth = `${year}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+                 }
+               }
+            }
+
+            updatedStudents[studentIndex] = {
+              ...st,
+              gender: row['Jenis Kelamin'] || row['L/P'] || row['Laki-laki / Perempuan'] || st.gender,
+              placeOfBirth: row['Tempat Lahir'] || st.placeOfBirth,
+              dateOfBirth: parsedDateOfBirth,
+              religion: row['Agama'] || "Islam", // Default all empty or invalid to Islam per request
+              address: row['Alamat'] || row['Domisili'] || st.address,
+              studentPhone: row['No HP Siswa'] || row['No WA Siswa'] || row['No Telepon Siswa'] || st.studentPhone,
+              parentName: row['Nama Orang Tua'] || row['Nama Wali'] || st.parentName,
+              parentPhone: row['No Telepon Orang Tua'] || row['No Telepon'] || row['No WhatsApp'] || row['HP Orang Tua'] || st.parentPhone,
+              photo: finalPhoto
+            };
+            changesMade++;
+          }
+        });
+
+        if (changesMade > 0) {
+          setStudents(updatedStudents);
+          alert(`Berhasil memperbarui data profil ${changesMade} siswa.`);
+        } else {
+          alert('Tidak ada data siswa yang cocok dengan NIS atau Nama di dalam file Excel.');
+        }
+      } catch (err) {
+        alert('Gagal membaca file Excel. Pastikan format sudah benar.');
+        console.error(err);
+      }
+    };
+    reader.readAsBinaryString(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   return (
@@ -653,7 +1676,7 @@ export default function WaliKelas({
           </div>
 
           {/* Homeroom Class Switcher */}
-          <div className="bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/10 space-y-2 w-full md:w-auto shrink-0">
+          <div className="bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/10 space-y-3 w-full md:w-auto shrink-0">
             <label className="text-[11px] font-bold text-indigo-200 uppercase tracking-wide flex items-center gap-1">
               <Building2 size={13} /> Pilih Kelas Wali:
             </label>
@@ -677,6 +1700,14 @@ export default function WaliKelas({
                 Atur
               </button>
             </div>
+            
+            <button
+              onClick={handlePrintFullReport}
+              className="w-full flex items-center justify-center gap-2 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer border border-indigo-400/30"
+              title="Cetak Laporan Layanan Wali Kelas Lengkap (Presensi, Catatan, Home Visit)"
+            >
+              <Printer size={14} /> Cetak Laporan Lengkap
+            </button>
           </div>
         </div>
 
@@ -720,6 +1751,17 @@ export default function WaliKelas({
           }`}
         >
           <Users size={15} /> Siswa ({classStudents.length})
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab("profil-siswa")}
+          className={`py-2.5 px-3.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+            activeSubTab === "profil-siswa"
+              ? "bg-white text-indigo-600 shadow-sm"
+              : "text-slate-500 hover:text-slate-800"
+          }`}
+        >
+          <UserCircle size={15} /> Profil Siswa
         </button>
 
         <button
@@ -827,13 +1869,25 @@ export default function WaliKelas({
                     </tr>
                   ) : (
                     filteredStudents.map((s, index) => {
-                      const att = studentAttendanceSummary[s.id] || { hadir: 0, sakit: 0, izin: 0, alpa: 0, total: 0 };
+                      const att = studentAttendanceSummary[s.id] || { hadir: 0, sakit: 0, izin: 0, alpa: 0, total: 0, logs: [] };
                       const acad = studentAcademicSummary[s.id] || { avgAssignment: 0, examScore: 0, finalAvg: 0 };
                       const rate = att.total > 0 ? Math.round((att.hadir / att.total) * 100) : 100;
-                      const hasAlert = att.alpa >= 2 || (acad.finalAvg > 0 && acad.finalAvg < 75);
+                      const sortedLogs = [...(att.logs || [])].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+                      let maxConsSakit = 0;
+                      let currConsSakit = 0;
+                      sortedLogs.forEach(l => {
+                        if (l.status === 'Sakit') {
+                          currConsSakit += 1;
+                          if (currConsSakit > maxConsSakit) maxConsSakit = currConsSakit;
+                        } else {
+                          currConsSakit = 0;
+                        }
+                      });
+                      const hasSakitAlert = maxConsSakit > 3 || att.sakit >= 15;
+                      const hasAlert = att.alpa >= 2 || (att.total > 0 && rate < 85) || hasSakitAlert || notes.some(n => n.studentId === s.id);
 
                       return (
-                        <tr key={s.id} className="hover:bg-slate-50/60 transition-colors">
+                        <tr key={`${s.id}_${index}`} className="hover:bg-slate-50/60 transition-colors">
                           <td className="py-3.5 px-4 font-bold text-slate-400">{index + 1}</td>
                           <td className="py-3.5 px-4">
                             <div className="flex items-center gap-2">
@@ -896,6 +1950,264 @@ export default function WaliKelas({
         </div>
       )}
 
+      {/* SUB-TAB: PROFIL SISWA */}
+      {activeSubTab === "profil-siswa" && (
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-xs space-y-6">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+              <div className="w-full sm:w-80">
+                <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Pilih Siswa Profil:</label>
+                <div className="relative mt-1.5">
+                  <select
+                    value={selectedStudentId || ""}
+                    onChange={(e) => setSelectedStudentId(e.target.value)}
+                    className="w-full appearance-none pl-4 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 cursor-pointer"
+                  >
+                    <option value="" disabled>-- Pilih Siswa --</option>
+                    {classStudents.map((student) => (
+                      <option key={student.id} value={student.id}>
+                        {student.name} ({student.nis})
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none rotate-90" />
+                </div>
+              </div>
+              <div className="w-full sm:w-auto flex flex-col sm:items-end gap-2">
+                <div className="flex gap-2 w-full sm:w-auto">
+                  <button
+                    onClick={handleDownloadProfileTemplate}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-3 py-2 bg-white text-indigo-600 hover:bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-sm"
+                    title="Unduh Format Template Profil (XLSX)"
+                  >
+                    <Download size={14} /> Template
+                  </button>
+                  <input
+                    type="file"
+                    accept=".xlsx, .xls"
+                    ref={fileInputRef}
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold transition-colors cursor-pointer border border-indigo-200 shadow-sm"
+                    title="Impor profil & foto dari file Excel. Kolom 'Link Foto' dapat berisi Link Foto Google Drive."
+                  >
+                    <FileSpreadsheet size={16} />
+                    Impor (XLSX)
+                  </button>
+                </div>
+                <p className="text-[9px] text-slate-400 text-center sm:text-right w-full sm:max-w-[250px] leading-tight">
+                  Mendukung update otomatis via link Google Drive di kolom Excel.
+                </p>
+              </div>
+            </div>
+
+            {selectedStudentId ? (
+              (() => {
+                const student = classStudents.find(s => s.id === selectedStudentId);
+                if (!student) return null;
+                return (
+                  <div className="flex flex-col md:flex-row gap-6">
+                    <div className="w-full md:w-1/3 space-y-4">
+                      <div className="bg-slate-50 p-6 rounded-3xl border border-slate-200 flex flex-col items-center text-center relative overflow-hidden">
+                        <div className="absolute top-0 left-0 w-full h-24 bg-indigo-600/10" />
+                        {student.photo ? (
+                          <div className="relative inline-block z-10 mb-4">
+                            <img 
+                              src={formatDriveImageUrl(student.photo)} 
+                              alt={student.name} 
+                              className="w-28 h-28 rounded-full object-cover border-4 border-white shadow-md transition-transform duration-300" 
+                              style={{ transform: `rotate(${student.photoRotation || 0}deg)` }}
+                              referrerPolicy="no-referrer"
+                            />
+                            <button
+                              onClick={() => {
+                                const currentRot = student.photoRotation || 0;
+                                setStudents(students.map(s => s.id === student.id ? { ...s, photoRotation: currentRot + 90 } : s));
+                              }}
+                              className="absolute bottom-0 right-0 p-1.5 bg-white shadow-lg text-indigo-600 rounded-full hover:bg-indigo-50 border border-slate-200"
+                              title="Putar Foto (Rotate)"
+                            >
+                              <RotateCw size={16} />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="w-28 h-28 rounded-full bg-white text-slate-300 flex items-center justify-center border-4 border-white shadow-md mb-4 relative z-10">
+                            <UserCircle size={64} strokeWidth={1} />
+                          </div>
+                        )}
+                        <h4 className="text-base font-black text-slate-800 relative z-10">{student.name}</h4>
+                        <p className="text-xs font-semibold text-slate-500 mt-1 relative z-10">NIS: {student.nis}</p>
+                        <span className="mt-3 px-3 py-1 bg-indigo-100 text-indigo-700 text-[10px] font-bold rounded-lg uppercase tracking-wider relative z-10">
+                          Kelas {student.className}
+                        </span>
+
+                        <div className="mt-4 w-full relative z-10 bg-white/80 p-3 rounded-2xl border border-slate-200 text-left">
+                          <label className="block text-[10px] font-extrabold text-slate-600 mb-1">
+                            Link Foto / Google Drive Siswa:
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="https://drive.google.com/file/d/..."
+                            value={student.photo || ""}
+                            onChange={(e) => {
+                              const newUrl = formatDriveImageUrl(e.target.value);
+                              setStudents(students.map(s => s.id === student.id ? { ...s, photo: newUrl } : s));
+                            }}
+                            className="w-full text-[11px] px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-800 font-mono"
+                          />
+                          <p className="text-[9px] text-slate-400 mt-1">
+                            Otomatis memproses & menampilkan foto dari link Google Drive.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="w-full md:w-2/3">
+                      <div className="bg-white rounded-3xl border border-slate-100 shadow-xs overflow-hidden">
+                        <div className="p-4 bg-slate-50 border-b border-slate-100">
+                          <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wide flex items-center gap-2">
+                            <FileText size={14} className="text-indigo-500" /> Data Pribadi
+                          </h5>
+                        </div>
+                        <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1">Jenis Kelamin</p>
+                            <p className="text-sm font-semibold text-slate-700">{student.gender === 'L' ? 'Laki-laki' : student.gender === 'P' ? 'Perempuan' : '-'}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1">Tempat Lahir</p>
+                            <p className="text-sm font-semibold text-slate-700 uppercase">{student.placeOfBirth || '-'}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1">Tanggal Lahir</p>
+                            <p className="text-sm font-semibold text-slate-700">
+                              {student.dateOfBirth ? (
+                                new Date(student.dateOfBirth).toLocaleDateString('id-ID', {
+                                  day: '2-digit',
+                                  month: 'long',
+                                  year: 'numeric'
+                                })
+                              ) : '-'}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1">Agama</p>
+                            <p className="text-sm font-semibold text-slate-700">{student.religion || '-'}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1 flex items-center gap-1"><Phone size={12} /> No. HP/WA Siswa</p>
+                            <div className="flex items-center gap-3">
+                              <p className="text-sm font-semibold text-slate-700">{student.studentPhone || '-'}</p>
+                              {student.studentPhone && (
+                                <a 
+                                  href={`https://wa.me/${student.studentPhone.replace(/\D/g, '').replace(/^0/, '62')}`} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className="px-2 py-1 bg-green-50 text-green-600 hover:bg-green-100 rounded text-[10px] font-bold transition-colors border border-green-200 flex items-center gap-1 shrink-0"
+                                >
+                                  Chat WA
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                          <div className="sm:col-span-2">
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1 flex items-center gap-1"><MapPin size={12} /> Alamat Domisili</p>
+                            <p className="text-sm font-semibold text-slate-700">{student.address || '-'}</p>
+                          </div>
+                        </div>
+                        <div className="p-4 bg-slate-50 border-y border-slate-100">
+                          <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wide flex items-center gap-2">
+                            <Users size={14} className="text-indigo-500" /> Data Orang Tua / Wali
+                          </h5>
+                        </div>
+                        <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1">Nama Orang Tua</p>
+                            <p className="text-sm font-semibold text-slate-700 uppercase">{student.parentName || '-'}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1 flex items-center gap-1"><Phone size={12} /> No. Telepon / WhatsApp</p>
+                            <div className="flex items-center gap-3">
+                              <p className="text-sm font-semibold text-slate-700">{student.parentPhone || '-'}</p>
+                              {student.parentPhone && (
+                                <a 
+                                  href={`https://wa.me/${student.parentPhone.replace(/\D/g, '').replace(/^0/, '62')}`} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className="px-2 py-1 bg-green-50 text-green-600 hover:bg-green-100 rounded text-[10px] font-bold transition-colors border border-green-200 flex items-center gap-1 shrink-0"
+                                >
+                                  Chat WA
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                          <div className="sm:col-span-2">
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1 flex items-center gap-1"><MapPin size={12} /> Alamat Domisili</p>
+                            <input 
+                              type="text"
+                              value={student.address || ""}
+                              onChange={(e) => setStudents(students.map(s => s.id === student.id ? { ...s, address: e.target.value } : s))}
+                              placeholder="Ketik alamat lengkap..."
+                              className="text-sm font-semibold text-slate-700 bg-transparent border-b border-dashed border-slate-300 focus:outline-none focus:border-indigo-500 w-full py-0.5 transition-colors"
+                            />
+                          </div>
+                        </div>
+                        <div className="p-4 bg-slate-50 border-y border-slate-100">
+                          <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wide flex items-center gap-2">
+                            <Users size={14} className="text-indigo-500" /> Data Orang Tua / Wali
+                          </h5>
+                        </div>
+                        <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1">Nama Orang Tua</p>
+                            <input 
+                              type="text"
+                              value={student.parentName || ""}
+                              onChange={(e) => setStudents(students.map(s => s.id === student.id ? { ...s, parentName: e.target.value } : s))}
+                              placeholder="Nama ayah / ibu..."
+                              className="text-sm font-semibold text-slate-700 bg-transparent border-b border-dashed border-slate-300 focus:outline-none focus:border-indigo-500 w-full py-0.5 transition-colors"
+                            />
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1 flex items-center gap-1"><Phone size={12} /> No. Telepon / WhatsApp</p>
+                            <div className="flex items-center gap-3">
+                              <input 
+                                type="tel"
+                                value={student.parentPhone || ""}
+                                onChange={(e) => setStudents(students.map(s => s.id === student.id ? { ...s, parentPhone: e.target.value } : s))}
+                                placeholder="08..."
+                                className="text-sm font-semibold text-slate-700 bg-transparent border-b border-dashed border-slate-300 focus:outline-none focus:border-indigo-500 w-full py-0.5 transition-colors"
+                              />
+                              {student.parentPhone && (
+                                <a 
+                                  href={`https://wa.me/${student.parentPhone.replace(/\D/g, '').replace(/^0/, '62')}`} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className="px-2 py-1 bg-green-50 text-green-600 hover:bg-green-100 rounded text-[10px] font-bold transition-colors border border-green-200 flex items-center gap-1 shrink-0"
+                                >
+                                  Chat WA
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()
+            ) : (
+              <div className="py-12 text-center text-slate-400 bg-slate-50/50 rounded-2xl border border-slate-100 border-dashed">
+                <UserCircle size={48} className="mx-auto mb-3 opacity-20" />
+                <p className="text-sm font-medium">Pilih siswa di atas untuk melihat detail profil.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* SUB-TAB 2: REKAP KEHADIRAN PRESENSI LENGKAP */}
       {activeSubTab === "rekap-kehadiran" && (
         <div className="space-y-4">
@@ -909,7 +2221,41 @@ export default function WaliKelas({
               </p>
             </div>
 
-            <div className="flex items-center gap-3 w-full sm:w-auto">
+            <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
+              {/* Semester Toggle */}
+              <div className="flex bg-slate-100 p-1 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedSemester(1);
+                    safeStorage.setItem("guru_attendance_semester", "1");
+                    setSelectedMonth("all");
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                    selectedSemester === 1 
+                      ? "bg-white text-indigo-600 shadow-xs font-black" 
+                      : "text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  Smtr 1
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedSemester(2);
+                    safeStorage.setItem("guru_attendance_semester", "2");
+                    setSelectedMonth("all");
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                    selectedSemester === 2 
+                      ? "bg-white text-indigo-600 shadow-xs font-black" 
+                      : "text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  Smtr 2
+                </button>
+              </div>
+
               <div className="flex items-center gap-2 shrink-0">
                 <Filter size={14} className="text-slate-400" />
                 <select
@@ -917,21 +2263,36 @@ export default function WaliKelas({
                   onChange={(e) => setSelectedMonth(e.target.value)}
                   className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-bold text-slate-700 focus:outline-none focus:border-indigo-500 cursor-pointer"
                 >
-                  <option value="all">Semua Bulan / Semester</option>
-                  <option value="01">Januari</option>
-                  <option value="02">Februari</option>
-                  <option value="03">Maret</option>
-                  <option value="04">April</option>
-                  <option value="05">Mei</option>
-                  <option value="06">Juni</option>
-                  <option value="07">Juli</option>
-                  <option value="08">Agustus</option>
-                  <option value="09">September</option>
-                  <option value="10">Oktober</option>
-                  <option value="11">November</option>
-                  <option value="12">Desember</option>
+                  <option value="all">Semua Bulan (Semester {selectedSemester})</option>
+                  {selectedSemester === 1 ? (
+                    <>
+                      <option value="07">Juli</option>
+                      <option value="08">Agustus</option>
+                      <option value="09">September</option>
+                      <option value="10">Oktober</option>
+                      <option value="11">November</option>
+                      <option value="12">Desember</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="01">Januari</option>
+                      <option value="02">Februari</option>
+                      <option value="03">Maret</option>
+                      <option value="04">April</option>
+                      <option value="05">Mei</option>
+                      <option value="06">Juni</option>
+                    </>
+                  )}
                 </select>
               </div>
+
+              <button
+                type="button"
+                onClick={initiateExport}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm cursor-pointer shrink-0"
+              >
+                <Download size={15} /> Pratinjau & Ekspor (.XLSX / .PDF)
+              </button>
 
               <button
                 type="button"
@@ -974,7 +2335,7 @@ export default function WaliKelas({
                       const rate = att.total > 0 ? Math.round((att.hadir / att.total) * 100) : 100;
 
                       return (
-                        <tr key={s.id} className="hover:bg-slate-50/60 transition-colors">
+                        <tr key={`${s.id}_${idx}`} className="hover:bg-slate-50/60 transition-colors">
                           <td className="py-3.5 px-4 font-bold text-slate-400">{idx + 1}</td>
                           <td className="py-3.5 px-4 font-bold text-slate-800">{s.name}</td>
                           <td className="py-3.5 px-4 font-mono text-slate-500">{s.nis}</td>
@@ -1021,25 +2382,151 @@ export default function WaliKelas({
 
       {/* SUB-TAB 3: LAPORAN HOME VISIT + DOKUMENTASI FOTO */}
       {activeSubTab === "home-visit" && (
-        <div className="space-y-4">
+        <div className="space-y-6">
+          {/* Header Bar */}
           <div className="bg-white p-4 sm:p-5 rounded-3xl border border-slate-100 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div>
               <h3 className="text-xs font-bold text-slate-800 flex items-center gap-2">
-                <Home size={16} className="text-indigo-600" /> Laporan Kunjungan Rumah (Home Visit)
+                <Home size={16} className="text-indigo-600" /> Laporan & Sistem Kategorisasi Home Visit (Kunjungan Rumah)
               </h3>
               <p className="text-[11px] text-slate-500 font-medium">
-                Pencatatan resmi kunjungan wali kelas ke rumah siswa beserta dokumentasi foto & kesepakatan orang tua
+                Pencatatan resmi kunjungan wali kelas berdasarkan 4 Kriteria Utama serta dokumentasi foto & kesepakatan orang tua
               </p>
             </div>
 
             <button
               type="button"
-              onClick={() => setIsOpenHomeVisitModal(true)}
+              onClick={() => {
+                setHvCategory("kat1");
+                setHvReason(HOME_VISIT_CATEGORIES[0].template);
+                setIsOpenHomeVisitModal(true);
+              }}
               className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm cursor-pointer shrink-0"
             >
               <Plus size={15} /> Buat Laporan Home Visit
             </button>
           </div>
+
+          {/* PEDOMAN 4 KATEGORI SISWA WAJIB HOME VISIT */}
+          <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white p-5 sm:p-6 rounded-3xl shadow-md space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-indigo-500/30 pb-3">
+              <div>
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 tracking-wider uppercase">
+                  Standar Operasional Prosedur (SOP)
+                </span>
+                <h4 className="text-sm font-extrabold text-white mt-1 flex items-center gap-2">
+                  <AlertTriangle size={17} className="text-amber-400" />
+                  4 Kategori Siswa Wajib Home Visit (Kunjungan Rumah)
+                </h4>
+              </div>
+              <p className="text-[11px] text-indigo-200/80">
+                Diidentifikasi secara langsung dari rekap presensi harian & catatan pembinaan wali kelas
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+              {HOME_VISIT_CATEGORIES.map(cat => (
+                <div key={cat.id} className="bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 rounded-2xl p-3.5 space-y-2.5 flex flex-col justify-between transition-all">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className={`px-2 py-0.5 rounded-lg text-[10px] font-extrabold ${cat.badge}`}>
+                        {cat.code}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-mono">Kriteria Resmi</span>
+                    </div>
+                    <h5 className="text-xs font-extrabold text-slate-100 leading-snug">
+                      {cat.title}
+                    </h5>
+                    <p className="text-[11px] text-slate-300/80 leading-relaxed">
+                      {cat.description}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHvCategory(cat.id);
+                      setHvReason(cat.template);
+                      setIsOpenHomeVisitModal(true);
+                    }}
+                    className="w-full py-1.5 bg-indigo-600/80 hover:bg-indigo-600 text-white rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer mt-1"
+                  >
+                    <Plus size={13} /> Pilih {cat.code}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* REKOMENDASI DETEKSI OTOMATIS SISWA PERLU HOME VISIT */}
+          {flaggedHomeVisitStudents.length > 0 && (
+            <div className="bg-rose-50/70 border border-rose-200/80 rounded-3xl p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 bg-rose-600 text-white rounded-xl">
+                    <AlertTriangle size={18} />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-extrabold text-rose-950">
+                      Rekomendasi Kunjungan Rumah Terdeteksi Sistem ({flaggedHomeVisitStudents.length} Siswa)
+                    </h4>
+                    <p className="text-[11px] text-rose-700 font-medium">
+                      Siswa berikut memenuhi 1 atau lebih kriteria dari 4 Kategori Wajib Home Visit
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {flaggedHomeVisitStudents.map(({ student, matchedCats, hasExistingVisit }, fIdx) => (
+                  <div key={`${student.id}_${fIdx}`} className="bg-white p-4 rounded-2xl border border-rose-100 shadow-2xs space-y-2.5 flex flex-col justify-between">
+                    <div className="space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <h5 className="font-extrabold text-xs text-slate-900">{student.name}</h5>
+                          <p className="text-[10px] text-slate-400 font-mono">NIS: {student.nis} • Kelas {student.className}</p>
+                        </div>
+                        {hasExistingVisit ? (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
+                            Sudah Ada Laporan
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200 shrink-0 animate-pulse">
+                            Perlu Home Visit
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap gap-1.5">
+                        {matchedCats.map(m => (
+                          <span key={m.id} className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${m.badge}`} title={m.detail}>
+                            {m.code}: {m.shortLabel}
+                          </span>
+                        ))}
+                      </div>
+
+                      <div className="text-[11px] text-slate-600 bg-slate-50 p-2 rounded-xl space-y-1">
+                        {matchedCats.map(m => (
+                          <div key={m.id} className="flex items-start gap-1">
+                            <span className="text-rose-500 font-bold">•</span>
+                            <span>{m.detail}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleStartHomeVisitForStudent(student.id, matchedCats[0]?.id)}
+                      className="w-full py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-xs cursor-pointer mt-1"
+                    >
+                      <Home size={14} /> Buat Laporan Home Visit untuk {student.name.split(" ")[0]}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Home Visit Cards Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1052,85 +2539,95 @@ export default function WaliKelas({
                 </p>
               </div>
             ) : (
-              classHomeVisits.map(visit => (
-                <div key={visit.id} className="bg-white p-5 rounded-3xl border border-slate-100 shadow-xs space-y-4 flex flex-col justify-between">
-                  <div className="space-y-3">
-                    {/* Card Header */}
-                    <div className="flex items-start justify-between pb-3 border-b border-slate-100 gap-2">
-                      <div>
-                        <h4 className="font-extrabold text-xs text-slate-800">{visit.studentName}</h4>
-                        <p className="text-[10px] text-slate-400 font-medium flex items-center gap-1 mt-0.5">
-                          <Calendar size={12} className="text-indigo-500" /> {visit.date}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => onDeleteHomeVisit(visit.id)}
-                        className="p-1 text-slate-300 hover:text-rose-600 transition-colors cursor-pointer"
-                        title="Hapus Laporan Home Visit"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-
-                    {/* Parent & Address */}
-                    <div className="space-y-1 text-xs">
-                      <div className="flex items-center gap-1.5 text-slate-600 font-medium">
-                        <Users size={13} className="text-indigo-600 shrink-0" />
-                        <span>Orang Tua: <strong className="text-slate-800">{visit.parentName}</strong></span>
-                      </div>
-                      <div className="flex items-start gap-1.5 text-slate-500 text-[11px]">
-                        <MapPin size={13} className="text-rose-500 shrink-0 mt-0.5" />
-                        <span>{visit.address}</span>
-                      </div>
-                    </div>
-
-                    {/* Reason & Result */}
-                    <div className="space-y-2 text-xs">
-                      <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Alasan Kunjungan</span>
-                        <p className="text-slate-700 font-medium leading-relaxed">{visit.reason}</p>
+              classHomeVisits.map(visit => {
+                const categoryObj = HOME_VISIT_CATEGORIES.find(c => c.id === visit.category);
+                return (
+                  <div key={visit.id} className="bg-white p-5 rounded-3xl border border-slate-100 shadow-xs space-y-4 flex flex-col justify-between">
+                    <div className="space-y-3">
+                      {/* Card Header */}
+                      <div className="flex items-start justify-between pb-3 border-b border-slate-100 gap-2">
+                        <div>
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            <h4 className="font-extrabold text-xs text-slate-800">{visit.studentName}</h4>
+                            {categoryObj && (
+                              <span className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold ${categoryObj.badge}`}>
+                                {categoryObj.code}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+                            <Calendar size={12} className="text-indigo-500" /> {visit.date}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onDeleteHomeVisit(visit.id)}
+                          className="p-1 text-slate-300 hover:text-rose-600 transition-colors cursor-pointer"
+                          title="Hapus Laporan Home Visit"
+                        >
+                          <Trash2 size={14} />
+                        </button>
                       </div>
 
-                      <div className="p-2.5 bg-emerald-50/70 rounded-xl border border-emerald-100">
-                        <span className="text-[10px] font-bold text-emerald-800 uppercase block mb-0.5">Hasil & Kesepakatan</span>
-                        <p className="text-emerald-950 font-medium leading-relaxed">{visit.result}</p>
-                      </div>
-                    </div>
-
-                    {/* Photo Documentation Thumbnails */}
-                    {visit.photos && visit.photos.length > 0 && (
-                      <div className="space-y-1.5 pt-1">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                          <Camera size={12} className="text-indigo-600" /> Dokumentasi Foto ({visit.photos.length})
-                        </span>
-                        <div className="flex gap-2 overflow-x-auto pb-1">
-                          {visit.photos.map((p, pIdx) => (
-                            <img
-                              key={pIdx}
-                              src={p}
-                              alt="Dokumentasi Home Visit"
-                              onClick={() => setLightboxImg(p)}
-                              className="w-16 h-16 object-cover rounded-xl border border-slate-200 cursor-pointer hover:opacity-80 transition-opacity shrink-0"
-                            />
-                          ))}
+                      {/* Parent & Address */}
+                      <div className="space-y-1 text-xs">
+                        <div className="flex items-center gap-1.5 text-slate-600 font-medium">
+                          <Users size={13} className="text-indigo-600 shrink-0" />
+                          <span>Orang Tua: <strong className="text-slate-800">{visit.parentName}</strong></span>
+                        </div>
+                        <div className="flex items-start gap-1.5 text-slate-500 text-[11px]">
+                          <MapPin size={13} className="text-rose-500 shrink-0 mt-0.5" />
+                          <span>{visit.address}</span>
                         </div>
                       </div>
-                    )}
-                  </div>
 
-                  {/* Print Button */}
-                  <div className="pt-2 border-t border-slate-100 flex justify-end">
-                    <button
-                      type="button"
-                      onClick={() => handlePrintHomeVisit(visit)}
-                      className="px-3.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Printer size={13} /> Cetak Laporan Home Visit (.PDF)
-                    </button>
+                      {/* Reason & Result */}
+                      <div className="space-y-2 text-xs">
+                        <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Alasan & Kategori Kunjungan</span>
+                          <p className="text-slate-700 font-medium leading-relaxed">{visit.reason}</p>
+                        </div>
+
+                        <div className="p-2.5 bg-emerald-50/70 rounded-xl border border-emerald-100">
+                          <span className="text-[10px] font-bold text-emerald-800 uppercase block mb-0.5">Hasil & Kesepakatan</span>
+                          <p className="text-emerald-950 font-medium leading-relaxed">{visit.result}</p>
+                        </div>
+                      </div>
+
+                      {/* Photo Documentation Thumbnails */}
+                      {visit.photos && visit.photos.length > 0 && (
+                        <div className="space-y-1.5 pt-1">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                            <Camera size={12} className="text-indigo-600" /> Dokumentasi Foto ({visit.photos.length})
+                          </span>
+                          <div className="flex gap-2 overflow-x-auto pb-1">
+                            {visit.photos.map((p, pIdx) => (
+                              <img
+                                key={pIdx}
+                                src={p}
+                                alt="Dokumentasi Home Visit"
+                                onClick={() => setLightboxImg(p)}
+                                className="w-16 h-16 object-cover rounded-xl border border-slate-200 cursor-pointer hover:opacity-80 transition-opacity shrink-0"
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Print Button */}
+                    <div className="pt-2 border-t border-slate-100 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => handlePrintHomeVisit(visit)}
+                        className="px-3.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Printer size={13} /> Cetak Laporan Home Visit (.PDF)
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
@@ -1346,7 +2843,7 @@ export default function WaliKelas({
             </div>
             <div>
               <h3 className="text-xs font-bold text-rose-900">Perhatian Khusus Siswa Kelas Bimbingan</h3>
-              <p className="text-[11px] text-rose-700 font-medium">Siswa dengan persentase Alpa tinggi, atau Nilai Rata-rata &lt; 75 KKM</p>
+              <p className="text-[11px] text-rose-700 font-medium">Siswa dengan persentase Alpa tinggi, tingkat kehadiran &lt; 85%, atau catatan pembinaan khusus</p>
             </div>
           </div>
 
@@ -1356,17 +2853,17 @@ export default function WaliKelas({
                 <CheckCircle2 size={36} className="mx-auto text-emerald-500" />
                 <h4 className="text-xs font-bold text-slate-800">Semua Siswa Terpantau Aman!</h4>
                 <p className="text-[11px] text-slate-400 font-medium">
-                  Tidak ada siswa dengan masalah kehadiran serius atau penurunan nilai drastis di kelas {homeroomClass}.
+                  Tidak ada siswa dengan masalah kehadiran serius atau catatan pembinaan khusus di kelas {homeroomClass}.
                 </p>
               </div>
             ) : (
-              classStats.alertStudents.map(student => {
+              classStats.alertStudents.map((student, aIdx) => {
                 const att = studentAttendanceSummary[student.id] || { hadir: 0, sakit: 0, izin: 0, alpa: 0, total: 0 };
-                const acad = studentAcademicSummary[student.id] || { avgAssignment: 0, examScore: 0, finalAvg: 0 };
+                const rate = att.total > 0 ? Math.round((att.hadir / att.total) * 100) : 100;
                 const stNotes = notes.filter(n => n.studentId === student.id);
 
                 return (
-                  <div key={student.id} className="bg-white p-5 rounded-3xl border border-rose-100 shadow-xs space-y-4">
+                  <div key={`${student.id}_${aIdx}`} className="bg-white p-5 rounded-3xl border border-rose-100 shadow-xs space-y-4">
                     <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                       <div>
                         <h4 className="font-extrabold text-xs text-slate-800">{student.name}</h4>
@@ -1385,9 +2882,9 @@ export default function WaliKelas({
                         </span>
                       </div>
                       <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100">
-                        <span className="text-[10px] text-slate-400 font-bold block">RATA-RATA NILAI</span>
-                        <span className={`font-black text-sm ${acad.finalAvg < 75 ? "text-rose-600" : "text-emerald-600"}`}>
-                          {acad.finalAvg}
+                        <span className="text-[10px] text-slate-400 font-bold block">PERSENTASE KEHADIRAN</span>
+                        <span className={`font-black text-sm ${rate < 85 ? "text-rose-600" : "text-emerald-600"}`}>
+                          {rate}%
                         </span>
                       </div>
                     </div>
@@ -1450,7 +2947,14 @@ export default function WaliKelas({
                 <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Pilih Siswa</label>
                 <select
                   value={hvStudentId}
-                  onChange={(e) => setHvStudentId(e.target.value)}
+                  onChange={(e) => {
+                    const sid = e.target.value;
+                    setHvStudentId(sid);
+                    const st = classStudents.find(s => s.id === sid);
+                    if (st && (!hvAddress || hvAddress.startsWith("Alamat tempat tinggal"))) {
+                      setHvAddress(`Alamat tempat tinggal ${st.name}`);
+                    }
+                  }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
                 >
                   <option value="">-- Pilih Siswa Kelas {homeroomClass} --</option>
@@ -1458,6 +2962,35 @@ export default function WaliKelas({
                     <option key={s.id} value={s.id}>{s.name} (NIS: {s.nis})</option>
                   ))}
                 </select>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+                  Kategori Kunjungan Rumah (Sesuai Kriteria Resmi)
+                </label>
+                <select
+                  value={hvCategory}
+                  onChange={(e) => {
+                    const selectedCat = e.target.value;
+                    setHvCategory(selectedCat);
+                    const catObj = HOME_VISIT_CATEGORIES.find(c => c.id === selectedCat);
+                    if (catObj && (!hvReason || HOME_VISIT_CATEGORIES.some(c => c.template === hvReason))) {
+                      setHvReason(catObj.template);
+                    }
+                  }}
+                  className="w-full bg-slate-50 border border-indigo-300 rounded-xl p-2.5 font-bold text-slate-800 focus:outline-none focus:border-indigo-500"
+                >
+                  {HOME_VISIT_CATEGORIES.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.code} - {c.title}
+                    </option>
+                  ))}
+                </select>
+                {HOME_VISIT_CATEGORIES.find(c => c.id === hvCategory) && (
+                  <p className="text-[10px] text-indigo-600 font-semibold mt-1">
+                    ℹ️ {HOME_VISIT_CATEGORIES.find(c => c.id === hvCategory)?.description}
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1677,6 +3210,16 @@ export default function WaliKelas({
           </div>
         </div>
       )}
+
+      {/* EXPORT PREVIEW MODAL FOR WALI KELAS REKAP */}
+      <ExportPreviewModal
+        isOpen={isPreviewOpen}
+        onClose={() => setIsPreviewOpen(false)}
+        onConfirm={handleExport}
+        data={previewData}
+        title={`Rekap Presensi Wali Kelas (Detail & Total) - ${homeroomClass}`}
+        columns={previewColumns.length > 0 ? previewColumns : ["NIS", "Nama", "Hadir (H)", "Sakit (S)", "Izin (I)", "Alpa (A)", "Tdk Mengajar (TM)", "Total KBM", "% Kehadiran"]}
+      />
     </div>
   );
 }

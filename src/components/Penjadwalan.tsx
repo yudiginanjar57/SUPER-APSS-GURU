@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { ScheduleItem } from "../types";
 import { CLASSES, SUBJECTS, CLASS_ROOM_MAPPING } from "../data/presets";
+import { compressFileForOCR } from "../lib/imageUtils";
 
 interface PenjadwalanProps {
   schedule: ScheduleItem[];
@@ -486,18 +487,20 @@ export default function Penjadwalan({
                         <input
                           type="file"
                           accept=".pdf,image/png,image/jpeg,image/jpg,image/webp"
-                          onChange={(e) => {
+                          onChange={async (e) => {
                             const file = e.target.files?.[0];
                             if (file) {
-                              const reader = new FileReader();
-                              reader.onloadend = () => {
+                              try {
+                                const base64 = await compressFileForOCR(file);
+                                const isPdf = file.type.includes("pdf") || file.name.toLowerCase().endsWith(".pdf");
                                 setImportFile({
-                                  base64: reader.result as string,
-                                  mimeType: file.type || "application/pdf",
+                                  base64,
+                                  mimeType: isPdf ? "application/pdf" : "image/jpeg",
                                   fileName: file.name
                                 });
-                              };
-                              reader.readAsDataURL(file);
+                              } catch (err) {
+                                console.error("Error processing file:", err);
+                              }
                             }
                           }}
                           className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10"
