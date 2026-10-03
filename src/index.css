@@ -30,50 +30,126 @@ body {
   background: #94a3b8;
 }
 
-/* Markdown & Stimulus Table Styling */
-.markdown-body table {
-  display: block;
-  width: 100%;
-  overflow-x: auto;
-  border-collapse: separate;
-  border-spacing: 0;
-  margin: 1.25rem 0;
-  border-radius: 0.875rem;
-  border: 1px solid #cbd5e1;
-  box-shadow: 0 2px 6px -1px rgba(15, 23, 42, 0.06);
+/* Markdown & Stimulus Table Styling - Formal All Border Kurikulum Merdeka */
+.markdown-body table, .doc-preview-content table {
+  display: block !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  table-layout: auto !important; /* Biarkan browser mengatur lebar kolom berdasarkan konten */
+  border-collapse: collapse !important;
+  margin: 1.25rem 0 !important;
+  font-size: 0.875rem !important;
+  border: 1.5px solid #0f172a !important; /* All Border luar tegas dan solid */
+  background-color: #ffffff !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
 }
 
-.markdown-body th {
-  background-color: #f1f5f9;
-  color: #0f172a;
-  font-weight: 700;
-  text-align: left;
-  padding: 0.75rem 1rem;
-  border-bottom: 2px solid #cbd5e1;
-  font-size: 0.8125rem;
-  text-transform: uppercase;
+.markdown-body thead, .doc-preview-content table thead,
+.markdown-body tbody, .doc-preview-content table tbody,
+.markdown-body tr, .doc-preview-content table tr {
+  border-radius: 0 !important;
+}
+
+.markdown-body th, .doc-preview-content table th {
+  background: #1e3a8a !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
+  text-align: left !important;
+  vertical-align: middle !important;
+  padding: 0.75rem 1rem !important;
+  border: 1.5px solid #0f172a !important; /* All Border header */
+  font-size: 0.8125rem !important;
   letter-spacing: 0.03em;
-  white-space: nowrap;
+  text-transform: uppercase;
+  border-radius: 0 !important;
+  word-wrap: normal !important;
+  overflow-wrap: normal !important;
+  word-break: normal !important;
+  white-space: normal !important;
 }
 
-.markdown-body td {
-  padding: 0.625rem 1rem;
-  border-bottom: 1px solid #e2e8f0;
-  color: #334155;
-  font-size: 0.875rem;
-  min-width: 100px;
+.markdown-body td, .doc-preview-content table td {
+  padding: 0.7rem 1rem !important;
+  border: 1px solid #1e293b !important; /* All Border sel dalam: garis horizontal dan vertikal tampak tegas */
+  color: #0f172a !important;
+  font-size: 0.875rem !important;
+  line-height: 1.55 !important;
+  vertical-align: top !important;
+  background-color: #ffffff;
+  border-radius: 0 !important;
+  word-wrap: normal !important;
+  overflow-wrap: normal !important;
+  word-break: normal !important;
+  text-align: left !important; /* Rata kiri untuk teks dalam sel agar rapi dan tidak terputus */
 }
 
-.markdown-body tr:last-child td {
-  border-bottom: none;
+.markdown-body tbody tr:nth-child(even) td, .doc-preview-content table tbody tr:nth-child(even) td {
+  background-color: #f8fafc !important;
 }
 
-.markdown-body tr:nth-child(even) {
+.markdown-body tbody tr:hover td, .doc-preview-content table tbody tr:hover td {
+  background-color: #f1f5f9 !important;
+}
+
+/* Two-column Identity Table Key Column Enhancement */
+.markdown-body table:not([style*="border: none"]):not(.signature-table) tr td:first-child:has(b, strong),
+.doc-preview-content table:not([style*="border: none"]):not(.signature-table) tr td:first-child:has(b, strong) {
   background-color: #f8fafc;
+  color: #0f172a;
+  font-weight: 600;
+  width: 28%;
+  border: 1px solid #1e293b !important;
 }
 
-.markdown-body tr:hover {
-  background-color: #f1f5f9;
+/* Borderless & Signature Table Styling */
+.markdown-body table[style*="border: none"],
+.markdown-body table[style*="border:none"],
+.markdown-body table.signature-table,
+.markdown-body table.no-border,
+.doc-preview-content table[style*="border: none"],
+.doc-preview-content table[style*="border:none"],
+.doc-preview-content table.signature-table,
+.doc-preview-content table.no-border {
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  margin-top: 2rem !important;
+  margin-bottom: 1.5rem !important;
+}
+
+.markdown-body table[style*="border: none"] th,
+.markdown-body table[style*="border:none"] th,
+.markdown-body table.signature-table th,
+.markdown-body table[style*="border: none"] td,
+.markdown-body table[style*="border:none"] td,
+.markdown-body table.signature-table td,
+.doc-preview-content table[style*="border: none"] th,
+.doc-preview-content table[style*="border:none"] th,
+.doc-preview-content table.signature-table th,
+.doc-preview-content table[style*="border: none"] td,
+.doc-preview-content table[style*="border:none"] td,
+.doc-preview-content table.signature-table td {
+  border: none !important;
+  background: transparent !important;
+  padding: 0.5rem 1rem !important;
+  box-shadow: none !important;
+}
+
+.markdown-body td ul, .markdown-body td ol, .doc-preview-content table td ul, .doc-preview-content table td ol {
+  margin: 0.2rem 0 !important;
+  padding-left: 1.15rem !important;
+}
+
+.markdown-body td li, .doc-preview-content table td li {
+  margin-bottom: 0.2rem !important;
+  line-height: 1.4 !important;
+}
+
+.markdown-body td li {
+  margin-bottom: 0.25rem !important;
+  line-height: 1.5 !important;
 }
 
 /* Inline SVG Chart / Diagram Stimulus Styling */
@@ -193,7 +269,7 @@ body {
 
 /* KaTeX Math Formula Styling */
 .markdown-body .katex-display {
-  margin: 1.25rem 0;
+  margin: 1rem 0;
   padding: 0.875rem 1.25rem;
   background-color: #f8fafc;
   border-radius: 0.875rem;
@@ -203,8 +279,32 @@ body {
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
 }
 
+.markdown-body li .katex-display {
+  margin: 0.625rem 0;
+}
+
 .markdown-body .katex {
-  font-size: 1.08em;
+  font-size: 1.05em;
   color: #0f172a;
+  text-rendering: optimizeLegibility;
+}
+
+.markdown-body .katex-error {
+  background-color: #fef2f2;
+  color: #b91c1c;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.375rem;
+  border: 1px solid #fecaca;
+  font-size: 0.9em;
+  font-family: var(--font-mono);
+}
+
+/* Force paragraph, blockquote, and list text to use elegant justify layout */
+.markdown-body p, .doc-preview-content p,
+.markdown-body li, .doc-preview-content li,
+.markdown-body blockquote, .doc-preview-content blockquote,
+.markdown-body div:not(.signature-table), .doc-preview-content div:not(.signature-table) {
+  text-align: justify !important;
+  text-justify: inter-word !important;
 }
 

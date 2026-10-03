@@ -3,17 +3,22 @@ import {
   getFirestore, 
   initializeFirestore, 
   memoryLocalCache,
-  setLogLevel,
-  disableNetwork,
-  enableNetwork
+  setLogLevel
 } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 import firebaseConfig from "../../firebase-applet-config.json";
 import { safeStorage } from "./safeStorage";
 
-// Silence verbose Firebase SDK log noise on network/quota errors
+// Clean up any stale quota blocks from previous sessions
 try {
-  setLogLevel("error");
+  safeStorage.removeItem("guru_firestore_quota_until");
+} catch {
+  // ignore
+}
+
+// Silence verbose Firebase SDK internal log noise
+try {
+  setLogLevel("silent");
 } catch {
   // ignore
 }
@@ -37,49 +42,21 @@ export interface FirestoreErrorInfo {
   };
 }
 
-let firestoreQuotaExceededUntil: number = 0;
+// Check if quota is currently exceeded (with brief transient backoff)
+let firestoreQuotaExceededUntil = 0;
 
 export function isFirestoreQuotaExceeded(): boolean {
-  if (firestoreQuotaExceededUntil === 0) {
-    try {
-      const saved = safeStorage.getItem("guru_firestore_quota_until");
-      if (saved) {
-        firestoreQuotaExceededUntil = Number(saved) || 0;
-      }
-    } catch {
-      // ignore
-    }
-  }
-  return Date.now() < firestoreQuotaExceededUntil;
+  return firestoreQuotaExceededUntil > 0 && Date.now() < firestoreQuotaExceededUntil;
 }
 
-export function markFirestoreQuotaExceeded(durationMinutes = 120): void {
+export function markFirestoreQuotaExceeded(durationMinutes = 5): void {
   firestoreQuotaExceededUntil = Date.now() + durationMinutes * 60 * 1000;
-  try {
-    safeStorage.setItem("guru_firestore_quota_until", String(firestoreQuotaExceededUntil));
-  } catch {
-    // ignore
-  }
-  try {
-    if (db) {
-      disableNetwork(db).catch(() => {});
-    }
-  } catch {
-    // ignore
-  }
 }
 
 export function clearFirestoreQuotaExceeded(): void {
   firestoreQuotaExceededUntil = 0;
   try {
     safeStorage.removeItem("guru_firestore_quota_until");
-  } catch {
-    // ignore
-  }
-  try {
-    if (db) {
-      enableNetwork(db).catch(() => {});
-    }
   } catch {
     // ignore
   }
@@ -99,14 +76,14 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   const isQuotaErr = 
     errInfo.error.includes("resource-exhausted") || 
     errInfo.error.includes("Quota limit exceeded") || 
-    errInfo.error.includes("quota") ||
-    errInfo.error.includes("Quota exceeded");
+    errInfo.error.includes("Quota exceeded") ||
+    errInfo.error.includes("quota");
 
   if (isQuotaErr) {
-    markFirestoreQuotaExceeded(120);
-    console.info(`[Firestore Quota Notice - ${operationType}] at ${path}: Kuota harian Firestore free tier tercapai. Aplikasi berjalan dalam mode penyimpanan lokal.`);
+    markFirestoreQuotaExceeded(30);
+    console.warn(`[Firestore Quota Notice - ${operationType}] at ${path}: Kuota harian Firestore free tier tercapai.`);
   } else {
-    console.warn(`[Firestore Error - ${operationType}] at ${path}:`, errInfo.error);
+    console.warn(`[Firestore Notice - ${operationType}] at ${path}:`, errInfo.error);
   }
 
   return errInfo;
@@ -115,7 +92,7 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 // Initialize Firebase App singleton
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
-// Initialize Firestore with memory cache and firestoreDatabaseId
+// Initialize Firestore with memory cache and specific database ID
 const dbId = (firebaseConfig as any).firestoreDatabaseId || "ai-studio-superappguru-d6d8d37d-7a79-4e4e-a3a7-8fb5ab409838";
 let dbInstance;
 try {
@@ -134,12 +111,3 @@ try {
 
 export const db = dbInstance;
 export const auth = getAuth(app);
-
-// Automatically disable Firestore network if quota is marked exceeded
-if (isFirestoreQuotaExceeded()) {
-  try {
-    disableNetwork(db).catch(() => {});
-  } catch {
-    // ignore
-  }
-}

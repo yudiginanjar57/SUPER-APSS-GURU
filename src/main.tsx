@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { GoogleOAuthProvider } from '@react-oauth/google';
+import { DriveDatabaseProvider } from './context/DriveSyncContext.tsx';
 import './index.css';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -14,7 +15,9 @@ createRoot(document.getElementById('root')!).render(
     <ErrorBoundary>
       {clientId ? (
         <GoogleOAuthProvider clientId={clientId}>
-          <App />
+          <DriveDatabaseProvider>
+            <App />
+          </DriveDatabaseProvider>
         </GoogleOAuthProvider>
       ) : (
         <App />

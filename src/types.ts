@@ -1,3 +1,6 @@
+import type { AppUser } from './lib/firebase';
+export type { AppUser };
+
 export interface Student {
   id: string;
   name: string;
@@ -13,6 +16,57 @@ export interface Student {
   parentName?: string;
   parentPhone?: string;
   studentPhone?: string;
+  nisn?: string;
+  attendanceNumber?: number | string;
+  status?: 'Aktif' | 'Mutasi' | 'Lulus' | 'Nonaktif';
+  email?: string;
+  linkedUserId?: string;
+}
+
+export interface SubjectMaster {
+  id: string;
+  code: string;
+  name: string;
+  category: string;
+  fase: string;
+  hoursPerWeek: number;
+  kkm: number;
+  assignedTeachers?: string[];
+  description?: string;
+}
+
+export interface ClassMaster {
+  id: string;
+  name: string;
+  gradeLevel: string;
+  fase: string;
+  major?: string;
+  homeroomTeacherId?: string;
+  homeroomTeacherName?: string;
+  room?: string;
+  capacity?: number;
+  academicYear?: string;
+}
+
+export interface SchoolMasterProfile {
+  schoolName: string;
+  npsn: string;
+  nss?: string;
+  educationLevel: string;
+  accreditation: string;
+  address: string;
+  city: string;
+  province: string;
+  postalCode?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
+  headmasterName: string;
+  headmasterNip: string;
+  headmasterRank: string;
+  academicYear: string;
+  semester: 'Ganjil' | 'Genap';
+  reportDate?: string;
 }
 
 export type AttendanceStatus = 'Hadir' | 'Sakit' | 'Izin' | 'Alpa' | 'Tidak Mengajar';
@@ -40,7 +94,7 @@ export interface Assignment {
   id: string;
   title: string;
   className: string;
-  category?: 'Tugas' | 'Ulangan Harian' | 'Proyek' | 'Kuis' | 'Lainnya';
+  category?: 'Tugas' | 'Ulangan' | 'Ulangan Harian' | 'Proyek' | 'Kuis' | 'Lainnya';
   dueDate: string;
   maxScore: number;
 }
@@ -202,6 +256,16 @@ export interface ViolationLog {
   timestamp: string;
   type: 'exit_fullscreen' | 'tab_switch' | 'split_screen' | 'copy_attempt' | 'window_resize';
   description: string;
+}
+
+export interface SavedModule {
+  id: string;
+  title: string;
+  subject: string;
+  className: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface EvaluationSubmission {

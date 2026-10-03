@@ -19,11 +19,14 @@ import {
   Loader2,
   FileText,
   RefreshCw,
-  AlertCircle
+  AlertCircle,
+  RotateCcw,
+  Database
 } from "lucide-react";
 import { ScheduleItem } from "../types";
 import { CLASSES, SUBJECTS, CLASS_ROOM_MAPPING } from "../data/presets";
 import { compressFileForOCR } from "../lib/imageUtils";
+import MenuDataRestoreModal from "./MenuDataRestoreModal";
 
 interface PenjadwalanProps {
   schedule: ScheduleItem[];
@@ -95,6 +98,70 @@ export default function Penjadwalan({
   const [importMode, setImportMode] = useState<"merge" | "replace">("merge");
   const [extractedSchedules, setExtractedSchedules] = useState<Omit<ScheduleItem, "id">[] | null>(null);
   const [aiSummary, setAiSummary] = useState("");
+  const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
+
+  // Export JSON Backup
+  const handleExportScheduleJson = () => {
+    const backupPayload = {
+      app: "EduAsisten",
+      version: "2.5",
+      category: "schedule",
+      exportedAt: new Date().toISOString(),
+      scheduleCount: schedule.length,
+      schedule: schedule
+    };
+    const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Backup_Jadwal_Mengajar_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Restore Schedule Data Handler
+  const handleRestoreScheduleData = (importedData: any, mode: "merge" | "replace") => {
+    let list: ScheduleItem[] = [];
+    if (Array.isArray(importedData)) {
+      list = importedData;
+    } else if (importedData && Array.isArray(importedData.schedule)) {
+      list = importedData.schedule;
+    }
+
+    if (!Array.isArray(list) || list.length === 0) {
+      return { success: false, message: "Tidak ditemukan data jadwal mengajar yang valid dalam berkas." };
+    }
+
+    const validList: Omit<ScheduleItem, "id">[] = list
+      .filter(item => item && item.subject && item.day && item.startTime)
+      .map(item => ({
+        subject: item.subject,
+        day: item.day,
+        startTime: item.startTime,
+        endTime: item.endTime || "09:00",
+        className: item.className || availableClasses[0] || "X-MIPA-1",
+        room: item.room || "",
+        agenda: item.agenda || ""
+      }));
+
+    if (validList.length === 0) {
+      return { success: false, message: "Format rekaman jadwal tidak sesuai dengan struktur sistem." };
+    }
+
+    if (onImportSchedules) {
+      onImportSchedules(validList, mode);
+    } else {
+      validList.forEach(item => onAddSchedule(item));
+    }
+
+    return {
+      success: true,
+      count: validList.length,
+      message: `Berhasil memulihkan ${validList.length} jadwal mengajar (${mode === "merge" ? "Gabung & Lengkapi" : "Ganti Keseluruhan"})!`
+    };
+  };
 
   // Filter schedule for the currently active day
   const activeDaySchedule = useMemo(() => {
@@ -253,6 +320,18 @@ export default function Penjadwalan({
 
         {/* Action Button Group */}
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-end">
+          {/* Restore & Backup Button */}
+          <motion.button
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={() => setIsRestoreModalOpen(true)}
+            className="px-3.5 py-2.5 bg-indigo-50 text-indigo-700 border border-indigo-200/80 hover:bg-indigo-100 rounded-2xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-2xs"
+            id="btn-restore-schedule"
+            title="Cadangkan atau Pulihkan Jadwal Mengajar"
+          >
+            <RotateCcw size={14} className="text-indigo-600" /> Cadangkan / Pulihkan
+          </motion.button>
+
           {/* AI Import Button */}
           <motion.button
             whileHover={{ scale: 1.03 }}
@@ -889,6 +968,18 @@ export default function Penjadwalan({
           </div>
         )}
       </AnimatePresence>
+
+      {/* Restore & Backup Jadwal Modal */}
+      <MenuDataRestoreModal
+        isOpen={isRestoreModalOpen}
+        onClose={() => setIsRestoreModalOpen(false)}
+        menuTitle="Jadwal Pelajaran & Mengajar"
+        menuKey="schedule"
+        currentDataCount={schedule.length}
+        currentDataSummary={`Mencakup ${schedule.length} agenda jam pelajaran aktif di seluruh kelas (${availableClasses.join(", ")}).`}
+        onExportBackup={handleExportScheduleJson}
+        onRestoreData={handleRestoreScheduleData}
+      />
     </div>
   );
 }

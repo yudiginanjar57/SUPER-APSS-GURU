@@ -1,4 +1,16 @@
 import { auth, db, handleFirestoreError, OperationType, isFirestoreQuotaExceeded } from './firebaseClient';
+import { safeStorage } from './safeStorage';
+import { 
+  CLASSES, 
+  PRESET_STUDENTS, 
+  PRESET_SCHEDULE, 
+  PRESET_ASSIGNMENTS, 
+  PRESET_SUBMISSIONS, 
+  PRESET_GRADES, 
+  PRESET_JOURNAL 
+} from '../data/presets';
+import { PRESET_LEARNING_MATERIALS } from '../data/presetMaterials';
+import { Student } from '../types';
 import { 
   GoogleAuthProvider, 
   signInWithPopup, 
@@ -23,6 +35,9 @@ import {
 } from 'firebase/firestore';
 
 const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({
+  prompt: 'select_account'
+});
 
 export type UserRole = 'admin' | 'guru' | 'siswa';
 export type UserStatus = 'pending' | 'approved' | 'rejected' | 'suspended';
@@ -44,6 +59,40 @@ export interface AppUser {
   phone?: string;
   institution?: string;
   kelas?: string;
+  subject?: string;
+  teachingClasses?: string[];
+  homeroomClass?: string;
+  gender?: string;
+  attendanceNumber?: string;
+  databaseKey?: string;
+}
+
+export function getTeacherDatabaseKey(user?: Partial<AppUser> | null): string {
+  if (!user) return 'guru_default';
+  if (user.databaseKey && user.databaseKey.trim()) {
+    return user.databaseKey.trim();
+  }
+  if (user.email && user.email.trim()) {
+    return `guru_${user.email.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_')}`;
+  }
+  if (user.username && user.username.trim()) {
+    return `guru_${user.username.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_')}`;
+  }
+  return 'guru_default';
+}
+
+export interface RegisterExtraDetails {
+  email?: string;
+  nip?: string;
+  nisn?: string;
+  phone?: string;
+  institution?: string;
+  subject?: string;
+  teachingClasses?: string[];
+  homeroomClass?: string;
+  kelas?: string;
+  gender?: string;
+  attendanceNumber?: string;
 }
 
 export interface UserActivityLog {
@@ -167,7 +216,8 @@ export const registerAccount = async (
   identifier: string, // username or email
   passwordRaw: string, 
   name: string, 
-  role: UserRole
+  role: UserRole,
+  extraDetails?: RegisterExtraDetails
 ): Promise<AppUser> => {
   const cleanId = identifier.trim().toLowerCase();
   const cleanName = name.trim();
@@ -193,20 +243,54 @@ export const registerAccount = async (
   const assignedRole: UserRole = isFirstUser ? 'admin' : role;
   const assignedStatus: UserStatus = isFirstUser ? 'approved' : 'pending';
 
+  // Determine email and database key
+  const finalEmail = (extraDetails?.email && extraDetails.email.trim()) 
+    ? extraDetails.email.trim().toLowerCase() 
+    : (cleanId.includes('@') ? cleanId : `${cleanId}@eduasisten.local`);
+
+  const databaseKey = assignedRole === 'guru' 
+    ? `guru_${finalEmail.replace(/[^a-z0-9_]/g, '_')}`
+    : undefined;
+
   const newUser: AppUser = {
     uid,
     username: cleanId,
-    email: cleanId.includes('@') ? cleanId : `${cleanId}@eduasisten.local`,
+    email: finalEmail,
     name: cleanName,
     photoURL: '',
     role: assignedRole,
     status: assignedStatus,
     passwordHash,
-    createdAt: serverTimestamp()
+    createdAt: serverTimestamp(),
+    nip: extraDetails?.nip?.trim() || '',
+    nisn: extraDetails?.nisn?.trim() || '',
+    phone: extraDetails?.phone?.trim() || '',
+    institution: extraDetails?.institution?.trim() || 'SMA Negeri 2 Tasikmalaya',
+    kelas: extraDetails?.kelas?.trim() || '',
+    subject: extraDetails?.subject?.trim() || '',
+    teachingClasses: extraDetails?.teachingClasses || [],
+    homeroomClass: extraDetails?.homeroomClass?.trim() || '',
+    gender: extraDetails?.gender?.trim() || '',
+    attendanceNumber: extraDetails?.attendanceNumber?.trim() || '',
+    databaseKey
   };
 
   const userRef = doc(db, 'users', uid);
   await setDoc(userRef, newUser);
+
+  // If first user (Admin) or pre-approved guru, seed their database document
+  if (assignedRole === 'guru' && assignedStatus === 'approved' && databaseKey) {
+    await seedInitialGuruData(
+      databaseKey,
+      cleanName,
+      extraDetails?.nip?.trim() || '',
+      extraDetails?.subject?.trim() || '',
+      extraDetails?.institution?.trim() || 'SMA Negeri 2 Tasikmalaya',
+      extraDetails?.homeroomClass?.trim() || 'X-MIPA-1',
+      extraDetails?.teachingClasses || [],
+      'System Auto-Register'
+    );
+  }
 
   // Exclude password hash from memory/state
   const safeUser: AppUser = { ...newUser };
@@ -341,54 +425,94 @@ export const signInWithGoogle = async (): Promise<AppUser | null> => {
     const result = await signInWithPopup(auth, googleProvider);
     const user = result.user;
     
-    const userRef = doc(db, 'users', user.uid);
-    const userSnap = await getDoc(userRef);
-    
     let appUser: AppUser;
     
-    if (userSnap.exists()) {
-      const data = userSnap.data();
-      if (data.status === 'suspended') {
-        throw new Error("Akun Google Anda sedang dinonaktifkan oleh Administrator.");
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      const userSnap = await getDoc(userRef);
+      
+      if (userSnap.exists()) {
+        const data = userSnap.data();
+        if (data.status === 'suspended') {
+          throw new Error("Akun Google Anda sedang dinonaktifkan oleh Administrator.");
+        }
+
+        await updateDoc(userRef, {
+          lastLogin: serverTimestamp(),
+          lastActive: serverTimestamp()
+        }).catch(() => {});
+
+        appUser = { 
+          uid: user.uid, 
+          username: data.username || user.email || user.uid,
+          email: data.email || user.email || '',
+          name: data.name || user.displayName || 'Pengguna',
+          photoURL: data.photoURL || user.photoURL || '',
+          role: data.role || 'guru',
+          status: data.status || 'approved',
+          createdAt: data.createdAt,
+          lastLogin: new Date(),
+          nip: data.nip,
+          nisn: data.nisn,
+          phone: data.phone,
+          institution: data.institution,
+          kelas: data.kelas,
+          databaseKey: data.databaseKey || (data.role === 'guru' ? getTeacherDatabaseKey(data) : undefined)
+        };
+      } else {
+        const allUsersSnap = await getDocs(query(collection(db, 'users'), limit(1))).catch(() => null);
+        const isFirstUser = allUsersSnap ? allUsersSnap.empty : false;
+
+        const role: UserRole = isFirstUser ? 'admin' : 'guru';
+        const status: UserStatus = isFirstUser ? 'approved' : 'pending';
+        const email = user.email || '';
+        const databaseKey = role === 'guru' 
+          ? `guru_${email.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_')}`
+          : undefined;
+
+        appUser = {
+          uid: user.uid,
+          username: user.email || user.uid,
+          email: email,
+          name: user.displayName || 'Pengguna Baru',
+          photoURL: user.photoURL || '',
+          role,
+          status,
+          createdAt: serverTimestamp(),
+          lastLogin: serverTimestamp(),
+          databaseKey
+        };
+        await setDoc(userRef, appUser).catch(() => {});
+
+        if (role === 'guru' && status === 'approved' && databaseKey) {
+          seedInitialGuruData(
+            databaseKey,
+            appUser.name,
+            '',
+            '',
+            'SMA Negeri 2 Tasikmalaya',
+            'X-MIPA-1',
+            [],
+            'Google SSO Auto Initialization'
+          ).catch(() => {});
+        }
       }
-
-      await updateDoc(userRef, {
-        lastLogin: serverTimestamp(),
-        lastActive: serverTimestamp()
-      });
-
-      appUser = { 
-        uid: user.uid, 
-        username: data.username || user.email || user.uid,
-        email: data.email || user.email || '',
-        name: data.name || user.displayName || 'Pengguna',
-        photoURL: data.photoURL || user.photoURL || '',
-        role: data.role || 'guru',
-        status: data.status || 'approved',
-        createdAt: data.createdAt,
-        lastLogin: new Date(),
-        nip: data.nip,
-        nisn: data.nisn,
-        phone: data.phone,
-        institution: data.institution,
-        kelas: data.kelas
-      };
-    } else {
-      const allUsersSnap = await getDocs(query(collection(db, 'users'), limit(1)));
-      const isFirstUser = allUsersSnap.empty;
-
+    } catch (firestoreErr: any) {
+      if (firestoreErr?.message?.includes("dinonaktifkan")) {
+        throw firestoreErr;
+      }
+      console.warn("Catatan: Sinkronisasi database online pengguna tertunda, menggunakan data profil Google SSO.", firestoreErr?.message || firestoreErr);
+      const email = user.email || '';
       appUser = {
         uid: user.uid,
-        username: user.email || user.uid,
-        email: user.email || '',
-        name: user.displayName || 'Pengguna Baru',
+        username: email || user.uid,
+        email: email,
+        name: user.displayName || 'Pengguna Google',
         photoURL: user.photoURL || '',
-        role: isFirstUser ? 'admin' : 'guru',
-        status: isFirstUser ? 'approved' : 'pending',
-        createdAt: serverTimestamp(),
-        lastLogin: serverTimestamp()
+        role: 'guru',
+        status: 'approved',
+        databaseKey: `guru_${email.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_')}`
       };
-      await setDoc(userRef, appUser);
     }
 
     logUserActivity({
@@ -399,13 +523,27 @@ export const signInWithGoogle = async (): Promise<AppUser | null> => {
       action: 'Masuk via Google',
       details: 'Pengguna login menggunakan akun Google SSO',
       type: 'login'
-    });
+    }).catch(() => {});
     
     watchUserDoc(user.uid);
     notifyAuthListeners(appUser);
     return appUser;
-  } catch (error) {
-    console.error("Error signing in with Google", error);
+  } catch (error: any) {
+    // Gracefully handle user cancellation/closing the popup window without logging an error
+    const errorCode = error?.code || '';
+    const errorMsg = error?.message || '';
+    if (
+      errorCode === 'auth/popup-closed-by-user' || 
+      errorCode === 'auth/cancelled-popup-request' ||
+      errorMsg.includes('auth/popup-closed-by-user') ||
+      errorMsg.includes('popup-closed-by-user') ||
+      errorMsg.includes('cancelled-popup-request')
+    ) {
+      console.info("Info: Jendela popup login Google ditutup oleh pengguna.");
+      return null;
+    }
+    
+    console.warn("Catatan autentikasi Google:", error?.message || error);
     throw error;
   }
 };
@@ -443,6 +581,81 @@ export async function adminResetUserPassword(
   });
 }
 
+// Helper function to seed initial preset template data for a newly approved teacher database partition
+export async function seedInitialGuruData(
+  databaseKey: string,
+  teacherName: string,
+  nip: string = '',
+  subject: string = '',
+  institution: string = 'SMA Negeri 2 Tasikmalaya',
+  homeroomClass: string = 'X-MIPA-1',
+  teachingClasses: string[] = [],
+  updatedBy: string = 'System Initialization'
+): Promise<void> {
+  if (isFirestoreQuotaExceeded() || !databaseKey) return;
+  try {
+    const guruDataRef = doc(db, 'guru_data', databaseKey);
+    const snap = await getDoc(guruDataRef);
+    const existing = snap.exists() ? snap.data() : null;
+
+    // Seed preset template data if document doesn't exist OR if students array is empty/missing
+    if (!existing || !Array.isArray(existing.students) || existing.students.length === 0) {
+      const mergedClasses = Array.from(new Set([...(teachingClasses || []), ...CLASSES]));
+      
+      // Fetch official student records from Admin master database corresponding to selected teaching classes
+      const targetClassesToFetch = teachingClasses && teachingClasses.length > 0 ? teachingClasses : [homeroomClass || 'X-MIPA-1'];
+      let initialStudents: Student[] = [];
+      try {
+        initialStudents = await fetchMasterStudentsFromAdmin(targetClassesToFetch);
+      } catch (err) {
+        console.warn("Could not fetch master students from Admin during seed, falling back:", err);
+      }
+      if (!initialStudents || initialStudents.length === 0) {
+        initialStudents = PRESET_STUDENTS;
+      }
+
+      await setDoc(guruDataRef, {
+        syncKey: databaseKey,
+        teacherName: teacherName || 'Guru Baru',
+        nip: nip || '',
+        subject: subject || '',
+        institution: institution || 'SMA Negeri 2 Tasikmalaya',
+        currentMonth: 'JANUARI 2026',
+        currentWeek: '2',
+        profilePhoto: existing?.profilePhoto || '',
+        homeroomClass: homeroomClass || 'X-MIPA-1',
+        classList: mergedClasses,
+        students: initialStudents,
+        attendanceList: existing?.attendanceList || [],
+        grades: PRESET_GRADES,
+        schedule: PRESET_SCHEDULE,
+        assignments: PRESET_ASSIGNMENTS,
+        submissions: PRESET_SUBMISSIONS,
+        journals: PRESET_JOURNAL,
+        homeroomNotes: [
+          {
+            id: "hn-1",
+            date: "12/01/2026",
+            studentId: "s1",
+            studentName: "Ahmad Fauzi",
+            category: "Prestasi",
+            title: "Juara 1 OSN Ekonomi Tingkat Kota",
+            content: "Siswa menunjukkan pemahaman yang sangat mendalam pada materi Ekonomi dan akuntansi. Diberikan bimbingan intensif untuk tingkat provinsi.",
+            followUp: "Diberikan modul soal OSN tingkat Provinsi.",
+            status: "Selesai"
+          }
+        ],
+        homeVisits: existing?.homeVisits || [],
+        materials: PRESET_LEARNING_MATERIALS,
+        lastUpdated: Date.now(),
+        updatedBy
+      }, { merge: true });
+    }
+  } catch (err) {
+    console.warn("Could not seed initial guru data:", err);
+  }
+}
+
 export async function adminUpdateUser(
   targetUid: string,
   updates: Partial<AppUser>,
@@ -455,12 +668,40 @@ export async function adminUpdateUser(
   }
   await updateDoc(userRef, cleanUpdates);
 
+  // If approved and role is guru, ensure database is initialized with email-based key & preset template data
+  if (updates.status === 'approved') {
+    try {
+      const snap = await getDoc(userRef);
+      if (snap.exists()) {
+        const uData = snap.data() as AppUser;
+        if (uData.role === 'guru') {
+          const dbKey = uData.databaseKey || getTeacherDatabaseKey(uData);
+          if (!uData.databaseKey) {
+            await updateDoc(userRef, { databaseKey: dbKey });
+          }
+          await seedInitialGuruData(
+            dbKey,
+            uData.name || 'Guru Baru',
+            uData.nip || '',
+            uData.subject || '',
+            uData.institution || 'SMA Negeri 2 Tasikmalaya',
+            uData.homeroomClass || 'X-MIPA-1',
+            uData.teachingClasses || [],
+            `Persetujuan Akun oleh ${adminUser?.name || 'Administrator'}`
+          );
+        }
+      }
+    } catch (e) {
+      console.warn("Could not auto-initialize teacher database on approval:", e);
+    }
+  }
+
   await logUserActivity({
     userId: targetUid,
     username: updates.username || targetUid,
     name: updates.name || 'Pengguna',
     role: updates.role || 'user',
-    action: 'Perbarui Data Akun',
+    action: updates.status === 'approved' ? 'Persetujuan Akun Pengguna' : 'Perbarui Data Akun',
     details: `Profil & status diperbarui (${updates.status ? `Status: ${updates.status}, ` : ''}${updates.role ? `Role: ${updates.role}` : ''})`,
     type: 'user_updated',
     performedBy: adminUser?.name || 'Administrator'
@@ -478,6 +719,8 @@ export async function userUpdateSelfProfile(
     kelas?: string;
     institution?: string;
     photoURL?: string;
+    teachingClasses?: string[];
+    homeroomClass?: string;
   }
 ): Promise<void> {
   const userRef = doc(db, 'users', uid);
@@ -676,6 +919,10 @@ export async function adminCreateUser(
   const uid = 'user_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
   const passwordHash = await hashPassword(userData.passwordRaw);
 
+  const dbKey = userData.role === 'guru'
+    ? `guru_${(userData.email?.trim() || `${cleanId}@eduasisten.local`).replace(/[^a-z0-9_]/g, '_')}`
+    : undefined;
+
   const newUser: AppUser = {
     uid,
     username: cleanId,
@@ -690,11 +937,25 @@ export async function adminCreateUser(
     nisn: userData.nisn?.trim() || '',
     phone: userData.phone?.trim() || '',
     institution: userData.institution?.trim() || '',
-    kelas: userData.kelas?.trim() || ''
+    kelas: userData.kelas?.trim() || '',
+    databaseKey: dbKey
   };
 
   const userRef = doc(db, 'users', uid);
   await setDoc(userRef, newUser);
+
+  if (userData.role === 'guru' && userData.status === 'approved' && dbKey) {
+    await seedInitialGuruData(
+      dbKey,
+      cleanName,
+      userData.nip?.trim() || '',
+      '',
+      userData.institution?.trim() || 'SMA Negeri 2 Tasikmalaya',
+      'X-MIPA-1',
+      [],
+      `Akun Dibuat Langsung oleh ${adminUser?.name || 'Administrator'}`
+    );
+  }
 
   await logUserActivity({
     userId: uid,
@@ -786,3 +1047,203 @@ export const subscribeToAuthChanges = (callback: (user: AppUser | null) => void)
     fbUnsub();
   };
 };
+
+const DEFAULT_SCHOOL_CLASSES_PRESET = [
+  "X-MIPA-1", "XI-MIPA-3", "XII-IPS-2",
+  "X-1", "X-2", "X-3",
+  "XI-1", "XI-2", "XI-3",
+  "XII-1", "XII-2", "XII-3",
+  "XII-C2", "XII-D1", "XII-D2", "XII-D3", "XII-D4", "TKA EKONOMI 1"
+];
+
+export async function fetchMasterClassesFromAdmin(): Promise<string[]> {
+  const localStored = safeStorage.getJSON<string[]>("guru_classes", []);
+  let foundClasses: string[] = [...DEFAULT_SCHOOL_CLASSES_PRESET, ...localStored];
+
+  if (!isFirestoreQuotaExceeded()) {
+    try {
+      // 1. Check school_master collection
+      const schoolMasterRef = doc(db, 'school_master', 'classes');
+      const schoolMasterSnap = await getDoc(schoolMasterRef);
+      if (schoolMasterSnap.exists()) {
+        const data = schoolMasterSnap.data();
+        if (Array.isArray(data.classList) && data.classList.length > 0) {
+          foundClasses = [...data.classList, ...foundClasses];
+        }
+      }
+
+      // 2. Check admin default user document
+      const adminDocRef = doc(db, 'users', 'admin_default');
+      const adminSnap = await getDoc(adminDocRef);
+      if (adminSnap.exists()) {
+        const aData = adminSnap.data();
+        if (Array.isArray(aData.classList) && aData.classList.length > 0) {
+          foundClasses = [...aData.classList, ...foundClasses];
+        }
+        if (Array.isArray(aData.teachingClasses) && aData.teachingClasses.length > 0) {
+          foundClasses = [...aData.teachingClasses, ...foundClasses];
+        }
+      }
+
+      // 3. Query all users with role 'admin'
+      const adminUsersQuery = query(collection(db, 'users'), where('role', '==', 'admin'));
+      const adminUsersSnap = await getDocs(adminUsersQuery);
+      adminUsersSnap.forEach((uDoc) => {
+        const uData = uDoc.data();
+        if (Array.isArray(uData.classList)) {
+          foundClasses = [...foundClasses, ...uData.classList];
+        }
+        if (Array.isArray(uData.teachingClasses)) {
+          foundClasses = [...foundClasses, ...uData.teachingClasses];
+        }
+      });
+
+      // 4. Query all documents in guru_data collection to pull existing class records
+      const guruDataQuery = query(collection(db, 'guru_data'), limit(20));
+      const guruDataSnap = await getDocs(guruDataQuery);
+      guruDataSnap.forEach((gDoc) => {
+        const gData = gDoc.data();
+        if (Array.isArray(gData.classList)) {
+          foundClasses = [...foundClasses, ...gData.classList];
+        }
+      });
+    } catch (err) {
+      console.warn("fetchMasterClassesFromAdmin warning:", err);
+    }
+  }
+
+  const uniqueClasses = Array.from(new Set(foundClasses.filter(Boolean)));
+  safeStorage.setItem("guru_classes", uniqueClasses);
+  return uniqueClasses;
+}
+
+export async function saveMasterClassesToFirestore(classes: string[]): Promise<void> {
+  if (isFirestoreQuotaExceeded() || !classes || classes.length === 0) return;
+  const unique = Array.from(new Set(classes.filter(Boolean)));
+  try {
+    const schoolMasterRef = doc(db, 'school_master', 'classes');
+    await setDoc(schoolMasterRef, { classList: unique, updatedAt: serverTimestamp() }, { merge: true });
+
+    const adminDocRef = doc(db, 'users', 'admin_default');
+    await setDoc(adminDocRef, { classList: unique, teachingClasses: unique }, { merge: true });
+  } catch (err) {
+    console.warn("saveMasterClassesToFirestore warning:", err);
+  }
+}
+
+export async function fetchMasterStudentsFromAdmin(selectedClasses?: string[]): Promise<Student[]> {
+  const localStored = safeStorage.getJSON<Student[]>("guru_students", []);
+  let allStudents: Student[] = [...localStored, ...PRESET_STUDENTS];
+
+  if (!isFirestoreQuotaExceeded()) {
+    try {
+      // 1. Check school_master/students
+      const schoolMasterRef = doc(db, 'school_master', 'students');
+      const schoolMasterSnap = await getDoc(schoolMasterRef);
+      if (schoolMasterSnap.exists()) {
+        const data = schoolMasterSnap.data();
+        if (Array.isArray(data.studentList) && data.studentList.length > 0) {
+          allStudents = [...data.studentList, ...allStudents];
+        }
+      }
+
+      // 2. Check admin default document
+      const adminDocRef = doc(db, 'users', 'admin_default');
+      const adminSnap = await getDoc(adminDocRef);
+      if (adminSnap.exists()) {
+        const aData = adminSnap.data();
+        if (Array.isArray(aData.students) && aData.students.length > 0) {
+          allStudents = [...aData.students, ...allStudents];
+        }
+      }
+
+      // 3. Query all users with role 'siswa'
+      const studentUsersQuery = query(collection(db, 'users'), where('role', '==', 'siswa'));
+      const studentUsersSnap = await getDocs(studentUsersQuery);
+      studentUsersSnap.forEach((sDoc) => {
+        const sData = sDoc.data();
+        if (sData.name && (sData.kelas || sData.className)) {
+          allStudents.push({
+            id: sDoc.id || sData.nisn || `s_${Date.now()}_${Math.random()}`,
+            name: sData.name,
+            nis: sData.nis || sData.username || '',
+            nisn: sData.nisn || '',
+            className: sData.kelas || sData.className || 'X-1',
+            gender: sData.gender || 'L',
+            attendanceNumber: sData.attendanceNumber || '',
+            studentPhone: sData.phone || '',
+            parentName: sData.parentName || '',
+            parentPhone: sData.parentPhone || '',
+            address: sData.address || '',
+            email: sData.email || '',
+            linkedUserId: sDoc.id
+          });
+        }
+      });
+
+      // 4. Query guru_data collection to pull students from other partitions
+      const guruDataQuery = query(collection(db, 'guru_data'), limit(20));
+      const guruDataSnap = await getDocs(guruDataQuery);
+      guruDataSnap.forEach((gDoc) => {
+        const gData = gDoc.data();
+        if (Array.isArray(gData.students) && gData.students.length > 0) {
+          allStudents = [...allStudents, ...gData.students];
+        }
+      });
+    } catch (err) {
+      console.warn("fetchMasterStudentsFromAdmin error:", err);
+    }
+  }
+
+  // Deduplicate by NISN / NIS / Name+Class
+  const uniqueMap = new Map<string, Student>();
+  allStudents.forEach((st) => {
+    if (!st || !st.name) return;
+    const key = (st.nisn && st.nisn.trim()) 
+      ? `nisn_${st.nisn.trim()}`
+      : (st.nis && st.nis.trim())
+      ? `nis_${st.nis.trim()}`
+      : `name_${st.name.trim().toLowerCase()}_${(st.className || '').trim().toLowerCase()}`;
+
+    if (!uniqueMap.has(key)) {
+      uniqueMap.set(key, st);
+    } else {
+      const existing = uniqueMap.get(key)!;
+      uniqueMap.set(key, {
+        ...st,
+        ...existing,
+        nisn: existing.nisn || st.nisn,
+        nis: existing.nis || st.nis,
+        parentName: existing.parentName || st.parentName,
+        parentPhone: existing.parentPhone || st.parentPhone,
+        address: existing.address || st.address,
+        studentPhone: existing.studentPhone || st.studentPhone
+      });
+    }
+  });
+
+  const mergedList = Array.from(uniqueMap.values());
+
+  // Filter by selectedClasses if provided and not containing 'all'
+  if (selectedClasses && selectedClasses.length > 0 && !selectedClasses.includes('all')) {
+    const classSet = new Set(selectedClasses.map(c => c.trim().toLowerCase()));
+    const filtered = mergedList.filter(s => s.className && classSet.has(s.className.trim().toLowerCase()));
+    return filtered.length > 0 ? filtered : mergedList;
+  }
+
+  return mergedList;
+}
+
+export async function saveMasterStudentsToFirestore(students: Student[]): Promise<void> {
+  if (isFirestoreQuotaExceeded() || !students || students.length === 0) return;
+  try {
+    const schoolMasterRef = doc(db, 'school_master', 'students');
+    await setDoc(schoolMasterRef, { studentList: students, updatedAt: serverTimestamp() }, { merge: true });
+
+    const adminDocRef = doc(db, 'users', 'admin_default');
+    await setDoc(adminDocRef, { students: students }, { merge: true });
+  } catch (err) {
+    console.warn("saveMasterStudentsToFirestore warning:", err);
+  }
+}
+

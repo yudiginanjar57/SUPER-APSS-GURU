@@ -63,8 +63,9 @@ export async function compressImage(file: File, maxDimension = 800, quality = 0.
 export async function compressFileForOCR(file: File, maxDimension = 1800, quality = 0.85): Promise<string> {
   const name = file.name.toLowerCase();
   const isPdf = file.type.includes("pdf") || name.endsWith(".pdf");
+  const isWord = file.type.includes("word") || name.endsWith(".doc") || name.endsWith(".docx");
 
-  if (isPdf) {
+  if (isPdf || isWord) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onerror = reject;

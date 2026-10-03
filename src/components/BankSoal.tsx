@@ -1,16 +1,18 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
-  Database, Plus, Search, Filter, Edit3, Trash2, X, FileText, ChevronDown
+  Database, Plus, Search, Filter, Edit3, Trash2, X, FileText, ChevronDown, RotateCcw
 } from "lucide-react";
 import { QuestionBankItem } from "../types";
 import { CLASSES } from "../data/presets";
+import MenuDataRestoreModal from "./MenuDataRestoreModal";
 
 interface BankSoalProps {
   questions: QuestionBankItem[];
   onAddQuestion: (q: QuestionBankItem) => void;
   onEditQuestion: (q: QuestionBankItem) => void;
   onDeleteQuestion: (id: string) => void;
+  onRestoreQuestions?: (items: QuestionBankItem[], mode: "merge" | "replace") => void;
   availableClasses: string[];
   subject: string;
 }
@@ -20,6 +22,7 @@ export default function BankSoal({
   onAddQuestion,
   onEditQuestion,
   onDeleteQuestion,
+  onRestoreQuestions,
   availableClasses,
   subject
 }: BankSoalProps) {
@@ -28,6 +31,78 @@ export default function BankSoal({
   const [filterType, setFilterType] = useState("Semua Tipe");
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState<QuestionBankItem | null>(null);
+  const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
+
+  // Export Question Bank JSON Backup
+  const handleExportQuestionsJson = () => {
+    const backupPayload = {
+      app: "EduAsisten",
+      version: "2.5",
+      category: "question_bank",
+      exportedAt: new Date().toISOString(),
+      questionsCount: questions.length,
+      questions: questions
+    };
+    const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Backup_Bank_Soal_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Restore Question Bank Data Handler
+  const handleRestoreQuestionsData = (importedData: any, mode: "merge" | "replace") => {
+    let list: QuestionBankItem[] = [];
+    if (Array.isArray(importedData)) {
+      list = importedData;
+    } else if (importedData && Array.isArray(importedData.questions)) {
+      list = importedData.questions;
+    } else if (importedData && Array.isArray(importedData.questionBank)) {
+      list = importedData.questionBank;
+    }
+
+    if (!Array.isArray(list) || list.length === 0) {
+      return { success: false, message: "Tidak ditemukan data butir soal yang valid dalam berkas." };
+    }
+
+    const validList: QuestionBankItem[] = list
+      .filter(item => item && item.question && item.type)
+      .map(item => ({
+        id: item.id || `qb-${Date.now()}-${Math.floor(Math.random()*1000)}`,
+        type: item.type,
+        question: item.question,
+        options: Array.isArray(item.options) ? item.options : ['A', 'B', 'C', 'D'],
+        matchingPairs: Array.isArray(item.matchingPairs) ? item.matchingPairs : undefined,
+        correctAnswer: item.correctAnswer || 'A',
+        points: typeof item.points === 'number' ? item.points : 10,
+        className: item.className || availableClasses[0] || 'Kelas 10',
+        subject: item.subject || subject || 'Umum',
+        bab: item.bab || 'BAB 1',
+        tags: Array.isArray(item.tags) ? item.tags : [],
+        createdAt: item.createdAt || new Date().toISOString(),
+        updatedAt: item.updatedAt || new Date().toISOString()
+      }));
+
+    if (validList.length === 0) {
+      return { success: false, message: "Format soal tidak sesuai dengan standar Bank Soal." };
+    }
+
+    if (onRestoreQuestions) {
+      onRestoreQuestions(validList, mode);
+    } else {
+      validList.forEach(q => onAddQuestion(q));
+    }
+
+    return {
+      success: true,
+      count: validList.length,
+      message: `Berhasil memulihkan ${validList.length} butir soal (${mode === "merge" ? "Gabung & Lengkapi" : "Ganti Total"})!`
+    };
+  };
 
   const [formData, setFormData] = useState<Partial<QuestionBankItem>>({
     type: 'pg',
@@ -126,12 +201,23 @@ export default function BankSoal({
             <p className="text-sm text-slate-500 font-medium">Kelola repositori butir soal Anda untuk ujian CBT.</p>
           </div>
         </div>
-        <button
-          onClick={handleOpenAddModal}
-          className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm shadow-md flex items-center justify-center gap-2 transition-colors cursor-pointer"
-        >
-          <Plus size={16} /> Tambah Soal
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setIsRestoreModalOpen(true)}
+            className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-sm shadow-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer border border-slate-200"
+            id="btn-restore-banksoal"
+            title="Cadangkan atau Pulihkan Data Bank Soal"
+          >
+            <RotateCcw size={15} className="text-amber-600" /> Cadangkan / Pulihkan
+          </button>
+          <button
+            onClick={handleOpenAddModal}
+            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm shadow-md flex items-center justify-center gap-2 transition-colors cursor-pointer"
+          >
+            <Plus size={16} /> Tambah Soal
+          </button>
+        </div>
       </div>
 
       {/* Filters & Search */}
@@ -350,6 +436,18 @@ export default function BankSoal({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Restore & Backup Bank Soal Modal */}
+      <MenuDataRestoreModal
+        isOpen={isRestoreModalOpen}
+        onClose={() => setIsRestoreModalOpen(false)}
+        menuTitle="Bank Soal (Item Repository)"
+        menuKey="bank_soal"
+        currentDataCount={questions.length}
+        currentDataSummary={`Menyimpan ${questions.length} butir soal pilihan ganda, essay, isian, dan menjodohkan untuk CBT.`}
+        onExportBackup={handleExportQuestionsJson}
+        onRestoreData={handleRestoreQuestionsData}
+      />
     </div>
   );
 }

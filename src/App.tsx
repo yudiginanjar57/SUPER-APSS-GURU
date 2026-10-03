@@ -74,7 +74,7 @@ import {
 } from "./data/presets";
 import { PRESET_LEARNING_MATERIALS } from "./data/presetMaterials";
 import { useGoogleLogin } from '@react-oauth/google';
-import { uploadBackupToDrive, listDriveBackups, downloadDriveBackup, pruneOldDriveBackups, DriveBackupItem } from "./lib/driveSync";
+import { uploadBackupToDrive, listDriveBackups, downloadDriveBackup, pruneOldDriveBackups, sanitizeSyncKey, DriveBackupItem } from "./lib/driveSync";
 import { formatDriveImageUrl } from "./lib/driveUtils";
 
 // Import Firebase Firestore Realtime Multi-Device Sync & Daily Backups
@@ -111,10 +111,22 @@ import RuangBelajar from "./components/RuangBelajar";
 import EvaluasiSiswa from "./components/EvaluasiSiswa";
 import BankSoal from "./components/BankSoal";
 import VerifikasiPengguna from "./components/VerifikasiPengguna";
+import ManajemenDataSekolah from "./components/ManajemenDataSekolah";
 import StudentDashboard from "./components/StudentDashboard";
 import PengaturanSiswaModal from "./components/PengaturanSiswa";
+import { DEFAULT_SUBJECTS, DEFAULT_SCHOOL_PROFILE } from "./data/masterDataPresets";
+import { SubjectMaster, ClassMaster, SchoolMasterProfile } from "./types";
 
-import { subscribeToAuthChanges, signOut, AppUser } from "./lib/firebase";
+import { 
+  subscribeToAuthChanges, 
+  signOut, 
+  AppUser, 
+  userUpdateSelfProfile, 
+  fetchMasterClassesFromAdmin, 
+  saveMasterClassesToFirestore,
+  fetchMasterStudentsFromAdmin,
+  saveMasterStudentsToFirestore
+} from "./lib/firebase";
 import Login from "./components/Login";
 import { Loader2, LogOut } from "lucide-react";
 
@@ -329,6 +341,28 @@ export default function App() {
   const [deletingClassName, setDeletingClassName] = useState<string | null>(null);
   const [classErrorMsg, setClassErrorMsg] = useState<string | null>(null);
   const [classSuccessMsg, setClassSuccessMsg] = useState<string | null>(null);
+  const [isSyncingAdminClasses, setIsSyncingAdminClasses] = useState(false);
+  const [syncAdminClassesMsg, setSyncAdminClassesMsg] = useState<string | null>(null);
+
+  const handleSyncAdminClasses = async () => {
+    setIsSyncingAdminClasses(true);
+    setSyncAdminClassesMsg(null);
+    try {
+      const adminClasses = await fetchMasterClassesFromAdmin();
+      if (adminClasses && adminClasses.length > 0) {
+        setClassList(prev => Array.from(new Set([...prev, ...adminClasses])));
+        setSyncAdminClassesMsg(`Berhasil menyinkronkan ${adminClasses.length} kelas dari database Administrator!`);
+      } else {
+        setSyncAdminClassesMsg("Daftar kelas telah mutakhir.");
+      }
+    } catch (err) {
+      console.warn("Failed to sync admin classes:", err);
+      setSyncAdminClassesMsg("Gagal mengambil data kelas dari database admin.");
+    } finally {
+      setIsSyncingAdminClasses(false);
+      setTimeout(() => setSyncAdminClassesMsg(null), 4000);
+    }
+  };
 
   const [selectedStudentClassFilter, setSelectedStudentClassFilter] = useState<string>("");
   const [newStudentName, setNewStudentName] = useState("");
@@ -413,9 +447,28 @@ export default function App() {
     setStudents(prev => sanitizeStudentsList(prev));
   }, []);
 
+  // Fetch master classes from Administrator database on mount
+  useEffect(() => {
+    let isMounted = true;
+    fetchMasterClassesFromAdmin().then(adminClasses => {
+      if (isMounted && adminClasses && adminClasses.length > 0) {
+        setClassList(prev => {
+          const merged = Array.from(new Set([...prev, ...adminClasses]));
+          safeStorage.setItem("guru_classes", merged);
+          return merged;
+        });
+      }
+    }).catch(err => console.warn("Auto fetch admin classes warning:", err));
+    return () => { isMounted = false; };
+  }, []);
+
   useEffect(() => {
     safeStorage.setItem("guru_classes", classList);
+    saveMasterClassesToFirestore(classList).catch(() => {});
   }, [classList]);
+
+  const [isSyncingAdminStudents, setIsSyncingAdminStudents] = useState(false);
+  const [syncAdminStudentsMsg, setSyncAdminStudentsMsg] = useState<string | null>(null);
 
   useEffect(() => {
     // Always save clean deduplicated student records
@@ -427,7 +480,88 @@ export default function App() {
       return true;
     });
     safeStorage.setItem("guru_students", unique);
-  }, [students]);
+    if (user?.role === 'admin' && unique.length > 0) {
+      saveMasterStudentsToFirestore(unique).catch(() => {});
+    }
+  }, [students, user?.role]);
+
+  const handleSyncStudentsFromAdmin = async (targetClasses?: string[]) => {
+    setIsSyncingAdminStudents(true);
+    setSyncAdminStudentsMsg(null);
+    try {
+      const classesToFetch = targetClasses && targetClasses.length > 0
+        ? targetClasses
+        : (user?.teachingClasses && user.teachingClasses.length > 0 ? user.teachingClasses : classList);
+
+      const fetched = await fetchMasterStudentsFromAdmin(classesToFetch);
+      if (fetched && fetched.length > 0) {
+        setStudents(prev => {
+          const map = new Map<string, Student>();
+          prev.forEach(s => { if (s && s.id) map.set(s.id, s); });
+          fetched.forEach(s => { if (s && s.id) map.set(s.id, s); });
+          const merged = Array.from(map.values());
+          safeStorage.setItem("guru_students", merged);
+          return merged;
+        });
+        setSyncAdminStudentsMsg(`Berhasil menarik ${fetched.length} data siswa dari database Administrator!`);
+      } else {
+        setSyncAdminStudentsMsg("Tidak ditemukan data siswa baru dari database Admin untuk kelas terpilih.");
+      }
+    } catch (err) {
+      console.warn("Gagal menyinkronkan data siswa dari Admin:", err);
+      setSyncAdminStudentsMsg("Gagal menyinkronkan data siswa dari Administrator.");
+    } finally {
+      setIsSyncingAdminStudents(false);
+      setTimeout(() => setSyncAdminStudentsMsg(null), 4000);
+    }
+  };
+
+  const handleSaveStudentsToMaster = async (studentsList: Student[]) => {
+    if (!studentsList || studentsList.length === 0) return;
+    try {
+      await saveMasterStudentsToFirestore(studentsList);
+      setSyncAdminStudentsMsg(`Berhasil menyimpan ${studentsList.length} data siswa ke Master Administrator!`);
+    } catch (err) {
+      console.warn("Gagal menyimpan ke master:", err);
+      setSyncAdminStudentsMsg("Gagal menyimpan data siswa ke Master Admin.");
+    } finally {
+      setTimeout(() => setSyncAdminStudentsMsg(null), 4000);
+    }
+  };
+
+  // Master Academic Data (Subjects, Class Metadata, School Master Profile)
+  const [masterSubjects, setMasterSubjects] = useState<SubjectMaster[]>(() => {
+    return loadStoredState<SubjectMaster[]>("guru_master_subjects", DEFAULT_SUBJECTS);
+  });
+
+  const [classMetadata, setClassMetadata] = useState<Record<string, Partial<ClassMaster>>>(() => {
+    return loadStoredState<Record<string, Partial<ClassMaster>>>("guru_class_metadata", {});
+  });
+
+  const [schoolMasterProfile, setSchoolMasterProfile] = useState<SchoolMasterProfile>(() => {
+    return loadStoredState<SchoolMasterProfile>("guru_school_master_profile", {
+      ...DEFAULT_SCHOOL_PROFILE,
+      schoolName: institution || DEFAULT_SCHOOL_PROFILE.schoolName,
+      headmasterName: headmasterName || DEFAULT_SCHOOL_PROFILE.headmasterName,
+      headmasterNip: headmasterNip || DEFAULT_SCHOOL_PROFILE.headmasterNip,
+      headmasterRank: headmasterRank || DEFAULT_SCHOOL_PROFILE.headmasterRank,
+      academicYear: academicYear || DEFAULT_SCHOOL_PROFILE.academicYear,
+      city: documentCity || DEFAULT_SCHOOL_PROFILE.city,
+      npsn: schoolNpsn || DEFAULT_SCHOOL_PROFILE.npsn
+    });
+  });
+
+  useEffect(() => {
+    safeStorage.setItem("guru_master_subjects", masterSubjects);
+  }, [masterSubjects]);
+
+  useEffect(() => {
+    safeStorage.setItem("guru_class_metadata", classMetadata);
+  }, [classMetadata]);
+
+  useEffect(() => {
+    safeStorage.setItem("guru_school_master_profile", schoolMasterProfile);
+  }, [schoolMasterProfile]);
 
   // Global background grading status from Penilaian
   const [globalGradingStatus, setGlobalGradingStatus] = useState<{ isGrading: boolean; progressText?: string }>({
@@ -495,6 +629,10 @@ export default function App() {
   // Homeroom Teacher (Wali Kelas) States
   const [homeroomClass, setHomeroomClass] = useState<string>(() => {
     return safeStorage.getItem("guru_homeroom_class") || "X-MIPA-1";
+  });
+
+  const [teachingClasses, setTeachingClasses] = useState<string[]>(() => {
+    return loadStoredState<string[]>("guru_teaching_classes", CLASSES);
   });
 
   const [homeroomNotes, setHomeroomNotes] = useState<HomeroomNote[]>(() => {
@@ -701,6 +839,10 @@ export default function App() {
   }, [homeroomClass]);
 
   useEffect(() => {
+    safeStorage.setItem("guru_teaching_classes", teachingClasses);
+  }, [teachingClasses]);
+
+  useEffect(() => {
     safeStorage.setItem("guru_homeroom_notes", homeroomNotes);
   }, [homeroomNotes]);
 
@@ -756,6 +898,65 @@ export default function App() {
     safeStorage.setItem("guru_attendance", attendanceList);
   }, [attendanceList]);
 
+  // Bi-directional synchronization: Ensure grades from Daftar Nilai (grades) are integrated into submissions (Kelola Tugas)
+  useEffect(() => {
+    if (!grades || grades.length === 0 || !assignments || assignments.length === 0) return;
+
+    let hasChanges = false;
+    const subMap = new Map<string, Submission>();
+    submissions.forEach(s => {
+      subMap.set(`${s.studentId}_${s.assignmentId}`, s);
+    });
+
+    const nextSubmissions = [...submissions];
+
+    grades.forEach(gradeRow => {
+      if (!gradeRow.assignmentScores) return;
+      const studentInfo = students.find(s => s.id === gradeRow.studentId);
+      const studentName = studentInfo?.name || gradeRow.studentName || "Siswa";
+
+      Object.entries(gradeRow.assignmentScores).forEach(([assignId, scoreVal]) => {
+        const targetAssignment = assignments.find(a => a.id === assignId);
+        if (targetAssignment && scoreVal !== undefined && scoreVal !== null && !isNaN(scoreVal)) {
+          const key = `${gradeRow.studentId}_${assignId}`;
+          const existingSub = subMap.get(key);
+
+          if (!existingSub) {
+            hasChanges = true;
+            const newSub: Submission = {
+              id: `sub-${gradeRow.studentId}-${assignId}`,
+              assignmentId: assignId,
+              studentId: gradeRow.studentId,
+              studentName,
+              submittedDate: new Date().toISOString().split("T")[0],
+              studentAnswer: "Dinilai melalui Daftar Nilai",
+              score: scoreVal,
+              status: "Selesai"
+            };
+            nextSubmissions.push(newSub);
+            subMap.set(key, newSub);
+          } else if (existingSub.score !== scoreVal || existingSub.status !== "Selesai") {
+            hasChanges = true;
+            const idx = nextSubmissions.findIndex(s => s.id === existingSub.id);
+            if (idx > -1) {
+              nextSubmissions[idx] = {
+                ...nextSubmissions[idx],
+                score: scoreVal,
+                status: "Selesai",
+                submittedDate: nextSubmissions[idx].submittedDate || new Date().toISOString().split("T")[0],
+                studentAnswer: nextSubmissions[idx].studentAnswer || "Dinilai melalui Daftar Nilai"
+              };
+            }
+          }
+        }
+      });
+    });
+
+    if (hasChanges) {
+      setSubmissions(nextSubmissions);
+    }
+  }, [grades, assignments, students]);
+
   // ====================================================
   // FIRESTORE REALTIME MULTI-DEVICE SYNC (HP ⇄ LAPTOP)
   // ====================================================
@@ -785,6 +986,68 @@ export default function App() {
     return safeStorage.getJSON<SyncLogEntry[]>("guru_sync_logs", []);
   });
   const [cloudSyncNotice, setCloudSyncNotice] = useState<{ message: string; fromDevice?: string } | null>(null);
+
+  // Auto-switch teacher database partition and profile when an approved Guru logs in
+  useEffect(() => {
+    if (user && user.role === 'guru') {
+      const emailDbKey = user.databaseKey || (user.email ? `guru_${user.email.replace(/[^a-z0-9_]/g, '_')}` : undefined);
+      if (emailDbKey && emailDbKey !== syncKey) {
+        setSyncKey(emailDbKey);
+        safeStorage.setItem("guru_sync_key", emailDbKey);
+      }
+      if (user.name) {
+        setTeacherName(user.name);
+        safeStorage.setItem("guru_name", user.name);
+      }
+      if (user.nip) {
+        setNip(user.nip);
+        safeStorage.setItem("guru_nip", user.nip);
+      }
+      if (user.subject) {
+        setSubject(user.subject);
+        safeStorage.setItem("guru_subject", user.subject);
+      }
+      if (user.institution) {
+        setInstitution(user.institution);
+        safeStorage.setItem("guru_institution", user.institution);
+      }
+      if (user.homeroomClass) {
+        setHomeroomClass(user.homeroomClass);
+        safeStorage.setItem("guru_homeroom_class", user.homeroomClass);
+      }
+      if (user.teachingClasses) {
+        setTeachingClasses(user.teachingClasses);
+        safeStorage.setItem("guru_teaching_classes", user.teachingClasses);
+        setClassList(prev => {
+          const combined = Array.from(new Set([...user.teachingClasses!, ...prev]));
+          safeStorage.setItem("guru_classes", combined);
+          return combined;
+        });
+      }
+    }
+  }, [user]);
+
+  // Derived filters based on user role and assignments
+  const isGuru = user?.role === 'guru';
+  const isAdmin = user?.role === 'admin';
+
+  const validTeacherClasses = useMemo(() => {
+    return Array.from(new Set([...teachingClasses, homeroomClass].filter(Boolean) as string[]));
+  }, [teachingClasses, homeroomClass]);
+
+  const filteredClassList = useMemo(() => {
+    if (isGuru) {
+      return classList.filter(c => validTeacherClasses.includes(c));
+    }
+    return classList;
+  }, [isGuru, classList, validTeacherClasses]);
+
+  const filteredStudents = useMemo(() => {
+    if (isGuru) {
+      return students.filter(s => validTeacherClasses.includes(s.className));
+    }
+    return students;
+  }, [isGuru, students, validTeacherClasses]);
 
   // Daily Backup States (Akhir Hari Backup to Cloud Firestore & Google Drive)
   const [dailyBackupHistory, setDailyBackupHistory] = useState<DailyBackupItem[]>([]);
@@ -843,18 +1106,43 @@ export default function App() {
     if (remoteData.academicYear !== undefined) setAcademicYear(remoteData.academicYear);
     if (remoteData.profilePhoto !== undefined) setProfilePhoto(remoteData.profilePhoto);
     if (remoteData.homeroomClass !== undefined) setHomeroomClass(remoteData.homeroomClass);
-    if (Array.isArray(remoteData.classList)) setClassList(remoteData.classList);
-    if (Array.isArray(remoteData.students)) setStudents(sanitizeStudentsList(remoteData.students));
-    if (Array.isArray(remoteData.attendanceList)) setAttendanceList(remoteData.attendanceList);
-    if (Array.isArray(remoteData.grades)) setGrades(remoteData.grades);
-    if (Array.isArray(remoteData.schedule)) setSchedule(remoteData.schedule);
-    if (Array.isArray(remoteData.assignments)) setAssignments(remoteData.assignments);
-    if (Array.isArray(remoteData.submissions)) setSubmissions(remoteData.submissions);
-    if (Array.isArray(remoteData.journals)) setJournals(remoteData.journals);
-    if (Array.isArray(remoteData.homeroomNotes)) setHomeroomNotes(remoteData.homeroomNotes);
-    if (Array.isArray(remoteData.homeVisits)) setHomeVisits(remoteData.homeVisits);
-    if (Array.isArray(remoteData.materials)) setMaterials(remoteData.materials);
-    if (Array.isArray(remoteData.bankQuestions)) setBankQuestions(remoteData.bankQuestions);
+    const isEmptyDatabase = Array.isArray(remoteData.students) && remoteData.students.length === 0 && (!remoteData.schedule || remoteData.schedule.length === 0);
+
+    if (isEmptyDatabase) {
+      setStudents(PRESET_STUDENTS);
+      setSchedule(PRESET_SCHEDULE);
+      setAssignments(PRESET_ASSIGNMENTS);
+      setSubmissions(PRESET_SUBMISSIONS);
+      setGrades(PRESET_GRADES);
+      setJournals(PRESET_JOURNAL);
+      setMaterials(PRESET_LEARNING_MATERIALS);
+      setClassList(CLASSES);
+
+      // Auto-save preset template data back to Firestore so cloud partition is populated
+      saveGuruDataToFirestore(syncKey, {
+        students: PRESET_STUDENTS,
+        schedule: PRESET_SCHEDULE,
+        assignments: PRESET_ASSIGNMENTS,
+        submissions: PRESET_SUBMISSIONS,
+        grades: PRESET_GRADES,
+        journals: PRESET_JOURNAL,
+        materials: PRESET_LEARNING_MATERIALS,
+        classList: CLASSES
+      }).catch(err => console.warn("Auto-sync preset data to empty cloud database error:", err));
+    } else {
+      if (Array.isArray(remoteData.classList)) setClassList(remoteData.classList);
+      if (Array.isArray(remoteData.students)) setStudents(sanitizeStudentsList(remoteData.students));
+      if (Array.isArray(remoteData.attendanceList)) setAttendanceList(remoteData.attendanceList);
+      if (Array.isArray(remoteData.grades)) setGrades(remoteData.grades);
+      if (Array.isArray(remoteData.schedule)) setSchedule(remoteData.schedule);
+      if (Array.isArray(remoteData.assignments)) setAssignments(remoteData.assignments);
+      if (Array.isArray(remoteData.submissions)) setSubmissions(remoteData.submissions);
+      if (Array.isArray(remoteData.journals)) setJournals(remoteData.journals);
+      if (Array.isArray(remoteData.homeroomNotes)) setHomeroomNotes(remoteData.homeroomNotes);
+      if (Array.isArray(remoteData.homeVisits)) setHomeVisits(remoteData.homeVisits);
+      if (Array.isArray(remoteData.materials)) setMaterials(remoteData.materials);
+      if (Array.isArray(remoteData.bankQuestions)) setBankQuestions(remoteData.bankQuestions);
+    }
 
     const updateTime = remoteData.lastUpdated || Date.now();
     lastRemoteUpdatedTimeRef.current = updateTime;
@@ -1140,14 +1428,17 @@ export default function App() {
 
   const loginForDriveList = useGoogleLogin({
     scope: 'https://www.googleapis.com/auth/drive.file',
-    prompt: '', // Skip prompt if already authenticated
     onSuccess: async (tokenResponse) => {
       setDriveToken(tokenResponse.access_token);
       try {
         setIsFetchingDriveHistory(true);
         const files = await listDriveBackups(tokenResponse.access_token, syncKey);
         setDriveBackupHistory(files);
-        setDriveBackupNotice({ type: "success", message: "Berhasil memuat daftar riwayat dari Google Drive" });
+        if (files.length === 0) {
+          setDriveBackupNotice({ type: "success", message: "Koneksi Google Drive berhasil. Belum ada berkas cadangan ditemukan." });
+        } else {
+          setDriveBackupNotice({ type: "success", message: `Berhasil memuat ${files.length} berkas riwayat dari Google Drive` });
+        }
       } catch (err: any) {
         setDriveBackupNotice({ type: "error", message: `Gagal memuat dari Drive: ${err.message}` });
       } finally {
@@ -1155,15 +1446,20 @@ export default function App() {
       }
     },
     onError: (error) => {
-      console.error('Google Login Error:', error);
-      setDriveBackupNotice({ type: "error", message: "Gagal mengautentikasi dengan Google Drive." });
+      const errStr = typeof error === 'object' ? JSON.stringify(error) : String(error);
+      if (errStr.includes('popup_closed') || errStr.includes('popup-closed')) {
+        console.info('Login Google Drive dibatalkan oleh pengguna.');
+        setIsFetchingDriveHistory(false);
+        return;
+      }
+      console.warn('Google Drive Login notice:', error);
+      setDriveBackupNotice({ type: "error", message: "Gagal mengautentikasi dengan Google Drive. Pastikan pop-up login tidak diblokir peramban." });
       setIsFetchingDriveHistory(false);
     }
   });
 
   const loginForDriveBackup = useGoogleLogin({
     scope: 'https://www.googleapis.com/auth/drive.file',
-    prompt: '', // Skip prompt if already authenticated
     onSuccess: async (tokenResponse) => {
       setDriveToken(tokenResponse.access_token);
       try {
@@ -1178,14 +1474,23 @@ export default function App() {
           homeroomNotes, homeVisits, materials
         };
 
-        // File name using current date
+        // File name using clean key and current date
         const dateStr = getLocalDateString();
-        const filename = `Backup_SuperAppGuru_${syncKey}_${dateStr}.json`;
+        const cleanKey = sanitizeSyncKey(syncKey);
+        const filename = `Backup_SuperAppGuru_${cleanKey}_${dateStr}.json`;
 
         await uploadBackupToDrive(tokenResponse.access_token, payload, filename);
         
         // Hapus cadangan yang lebih lama dari 5 hari secara otomatis
         await pruneOldDriveBackups(tokenResponse.access_token, syncKey);
+
+        // Auto refresh drive history list after upload
+        try {
+          const files = await listDriveBackups(tokenResponse.access_token, syncKey);
+          setDriveBackupHistory(files);
+        } catch (refreshErr) {
+          console.warn("Auto refresh history error:", refreshErr);
+        }
 
         setDriveBackupNotice({ type: "success", message: `Backup berhasil disimpan ke Google Drive dengan nama: ${filename}` });
       } catch (err: any) {
@@ -1195,8 +1500,14 @@ export default function App() {
       }
     },
     onError: (error) => {
-      console.error('Google Login Error:', error);
-      setDriveBackupNotice({ type: "error", message: "Gagal mengautentikasi dengan Google Drive." });
+      const errStr = typeof error === 'object' ? JSON.stringify(error) : String(error);
+      if (errStr.includes('popup_closed') || errStr.includes('popup-closed')) {
+        console.info('Backup Google Drive dibatalkan oleh pengguna.');
+        setIsDriveBackupSaving(false);
+        return;
+      }
+      console.warn('Google Drive Login notice:', error);
+      setDriveBackupNotice({ type: "error", message: "Gagal mengautentikasi dengan Google Drive. Pastikan pop-up login tidak diblokir peramban." });
       setIsDriveBackupSaving(false);
     }
   });
@@ -1745,6 +2056,183 @@ export default function App() {
     }
   };
 
+  const handleBatchDeleteStudents = (studentIds: string[]) => {
+    if (!studentIds || studentIds.length === 0) return;
+    setStudents(prev => prev.filter(s => !studentIds.includes(s.id)));
+    setStudentSuccessMsg(`${studentIds.length} data siswa berhasil dihapus secara massal.`);
+    setTimeout(() => setStudentSuccessMsg(null), 3500);
+  };
+
+  // MASTER DATA MANAGEMENT HANDLERS (ADMINISTRATOR)
+  const handleAddStudentFromAdmin = (s: Partial<Student>) => {
+    const trimmedName = s.name?.trim() || "";
+    if (!trimmedName) return;
+    const finalClass = s.className || classList[0] || "X-1";
+    const created: Student = {
+      id: `s-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      name: trimmedName,
+      nis: s.nis?.trim() || `${Math.floor(1000000 + Math.random() * 9000000)}`,
+      nisn: s.nisn?.trim() || "",
+      className: finalClass,
+      gender: s.gender || 'L',
+      attendanceNumber: s.attendanceNumber || '',
+      parentName: s.parentName || '',
+      parentPhone: s.parentPhone || '',
+      studentPhone: s.studentPhone || '',
+      address: s.address || ''
+    };
+    setStudents(prev => [...prev, created]);
+    setStudentSuccessMsg(`Siswa "${trimmedName}" berhasil ditambahkan.`);
+    setTimeout(() => setStudentSuccessMsg(null), 3500);
+  };
+
+  const handleBatchTransferClass = (studentIds: string[], targetClass: string) => {
+    setStudents(prev => prev.map(s => studentIds.includes(s.id) ? { ...s, className: targetClass } : s));
+    setStudentSuccessMsg(`${studentIds.length} siswa berhasil dimutasi ke kelas ${targetClass}.`);
+    setTimeout(() => setStudentSuccessMsg(null), 3500);
+  };
+
+  const handleImportStudents = (imported: Student[]) => {
+    let addedCount = 0;
+    let enrichedCount = 0;
+    let unchangedCount = 0;
+
+    setStudents(prev => {
+      const updatedList = [...prev];
+
+      imported.forEach(imp => {
+        const impNameNorm = (imp.name || "").trim().toLowerCase();
+        const impClassNorm = (imp.className || "").trim().toLowerCase();
+        const impNis = (imp.nis || "").trim();
+        const impNisn = (imp.nisn || "").trim();
+
+        const matchIndex = updatedList.findIndex(existing => {
+          const exNis = (existing.nis || "").trim();
+          const exNisn = (existing.nisn || "").trim();
+          const exNameNorm = (existing.name || "").trim().toLowerCase();
+          const exClassNorm = (existing.className || "").trim().toLowerCase();
+
+          // Match by NISN if both have it
+          if (impNisn && exNisn && impNisn === exNisn) return true;
+          // Match by NIS if both have it
+          if (impNis && exNis && impNis === exNis) return true;
+          // Match by Name and Class
+          if (impNameNorm && exNameNorm && impNameNorm === exNameNorm && (!impClassNorm || !exClassNorm || impClassNorm === exClassNorm)) return true;
+          // Match by Name only if both have unique identical full names
+          if (impNameNorm && exNameNorm && impNameNorm === exNameNorm && impNameNorm.length >= 4) return true;
+
+          return false;
+        });
+
+        if (matchIndex >= 0) {
+          const existing = updatedList[matchIndex];
+          let hasEnrichment = false;
+
+          // Only fill missing/empty fields, never overwrite existing valid data
+          const enriched: Student = {
+            ...existing,
+            name: existing.name || imp.name,
+            nis: existing.nis ? existing.nis : (imp.nis || ""),
+            nisn: existing.nisn ? existing.nisn : (imp.nisn || ""),
+            className: existing.className ? existing.className : (imp.className || ""),
+            gender: existing.gender ? existing.gender : (imp.gender || 'L'),
+            attendanceNumber: existing.attendanceNumber ? existing.attendanceNumber : (imp.attendanceNumber || ""),
+            studentPhone: existing.studentPhone ? existing.studentPhone : (imp.studentPhone || ""),
+            parentName: existing.parentName ? existing.parentName : (imp.parentName || ""),
+            parentPhone: existing.parentPhone ? existing.parentPhone : (imp.parentPhone || ""),
+            address: existing.address ? existing.address : (imp.address || ""),
+          };
+
+          if (
+            (!existing.nis && imp.nis) ||
+            (!existing.nisn && imp.nisn) ||
+            (!existing.gender && imp.gender) ||
+            (!existing.attendanceNumber && imp.attendanceNumber) ||
+            (!existing.studentPhone && imp.studentPhone) ||
+            (!existing.parentName && imp.parentName) ||
+            (!existing.parentPhone && imp.parentPhone) ||
+            (!existing.address && imp.address)
+          ) {
+            hasEnrichment = true;
+          }
+
+          if (hasEnrichment) {
+            enrichedCount++;
+            updatedList[matchIndex] = enriched;
+          } else {
+            unchangedCount++;
+          }
+        } else {
+          addedCount++;
+          updatedList.push(imp);
+        }
+      });
+
+      return updatedList;
+    });
+
+    const msgParts: string[] = [];
+    if (addedCount > 0) msgParts.push(`${addedCount} siswa baru ditambahkan`);
+    if (enrichedCount > 0) msgParts.push(`${enrichedCount} data siswa berhasil dilengkapi`);
+    if (unchangedCount > 0 && addedCount === 0 && enrichedCount === 0) msgParts.push(`${unchangedCount} siswa sudah lengkap (tidak ada data kosong yang diisi)`);
+
+    setStudentSuccessMsg(`Impor selesai: ${msgParts.length > 0 ? msgParts.join(', ') : 'Data siswa telah sinkron'}.`);
+    setTimeout(() => setStudentSuccessMsg(null), 4500);
+  };
+
+  const handleAddSubject = (sub: SubjectMaster) => {
+    setMasterSubjects(prev => [...prev, sub]);
+  };
+
+  const handleEditSubject = (sub: SubjectMaster) => {
+    setMasterSubjects(prev => prev.map(s => s.id === sub.id ? sub : s));
+  };
+
+  const handleDeleteSubject = (subId: string) => {
+    setMasterSubjects(prev => prev.filter(s => s.id !== subId));
+  };
+
+  const handleUpdateSchoolProfile = (profile: SchoolMasterProfile) => {
+    setSchoolMasterProfile(profile);
+    if (profile.schoolName) setInstitution(profile.schoolName);
+    if (profile.headmasterName) setHeadmasterName(profile.headmasterName);
+    if (profile.headmasterNip) setHeadmasterNip(profile.headmasterNip);
+    if (profile.headmasterRank) setHeadmasterRank(profile.headmasterRank);
+    if (profile.academicYear) setAcademicYear(profile.academicYear);
+    if (profile.city) setDocumentCity(profile.city);
+    if (profile.npsn) setSchoolNpsn(profile.npsn);
+  };
+
+  const handleRestoreMasterData = (data: {
+    students?: Student[];
+    classList?: string[];
+    subjects?: SubjectMaster[];
+    schoolProfile?: SchoolMasterProfile;
+  }) => {
+    if (Array.isArray(data.students) && data.students.length > 0) {
+      setStudents(data.students);
+    }
+    if (Array.isArray(data.classList) && data.classList.length > 0) {
+      setClassList(data.classList);
+    }
+    if (Array.isArray(data.subjects) && data.subjects.length > 0) {
+      setMasterSubjects(data.subjects);
+    }
+    if (data.schoolProfile) {
+      handleUpdateSchoolProfile(data.schoolProfile);
+    }
+  };
+
+  const handleUpdateClassMeta = (className: string, meta: Partial<ClassMaster>) => {
+    setClassMetadata(prev => ({
+      ...prev,
+      [className]: {
+        ...(prev[className] || {}),
+        ...meta
+      }
+    }));
+  };
+
   // EXCEL IMPORT HANDLERS
   const downloadExcelTemplate = () => {
     const templateData = [
@@ -1865,11 +2353,12 @@ export default function App() {
         ...prev.filter(s => !targetClassesSet.has(s.className)),
         ...newStudentObjects
       ]);
+      setImportSuccessMsg(`Berhasil mengganti data kelas dengan ${newStudentObjects.length} siswa dari ${importPreview.fileName}`);
     } else {
-      setStudents(prev => [...prev, ...newStudentObjects]);
+      handleImportStudents(newStudentObjects);
+      setImportSuccessMsg(`Berhasil memproses ${newStudentObjects.length} siswa dari ${importPreview.fileName}`);
     }
 
-    setImportSuccessMsg(`Berhasil mengimpor ${newStudentObjects.length} siswa dari ${importPreview.fileName}`);
     setImportPreview(null);
   };
 
@@ -2143,8 +2632,26 @@ export default function App() {
     setJournals(prev => prev.filter(j => j.id !== id));
   };
 
-  // 6. DaftarNilai: Update individual cell inside spreadsheet
+  // 6. DaftarNilai: Update individual cell inside spreadsheet & synchronize with Kelola Tugas
   const handleUpdateGradeCell = (studentId: string, type: string, value: number) => {
+    const studentInfo = students.find(s => s.id === studentId);
+    const studentClass = studentInfo?.className || CLASSES[0];
+    const todayStr = new Date().toISOString().split("T")[0];
+
+    // Check if this is an STS/PTS or SAS/PAS ulangan assignment
+    const matchingAsg = assignments.find(a => a.id === type);
+    const isMidtermMatch = type === "midterm" || (matchingAsg && (
+      matchingAsg.title.toLowerCase().includes("tengah semester") || 
+      matchingAsg.title.toLowerCase().includes("sts") || 
+      matchingAsg.title.toLowerCase().includes("pts")
+    ));
+    const isExamMatch = type === "exam" || (matchingAsg && (
+      matchingAsg.title.toLowerCase().includes("akhir semester") || 
+      matchingAsg.title.toLowerCase().includes("sas") || 
+      matchingAsg.title.toLowerCase().includes("pas")
+    ));
+
+    // 1. Update Core Grade Matrix (StudentGrade)
     setGrades(prev => {
       const existIdx = prev.findIndex(g => g.studentId === studentId);
       if (existIdx > -1) {
@@ -2156,29 +2663,112 @@ export default function App() {
         } else if (type === "character") {
           updated[existIdx] = { ...updated[existIdx], characterScore: value };
         } else {
+          // Standard assignment or matching exam
+          const nextScores = {
+            ...updated[existIdx].assignmentScores,
+            [type]: value
+          };
           updated[existIdx] = {
             ...updated[existIdx],
-            assignmentScores: {
-              ...updated[existIdx].assignmentScores,
-              [type]: value
-            }
+            assignmentScores: nextScores,
+            midtermScore: isMidtermMatch ? value : updated[existIdx].midtermScore,
+            examScore: isExamMatch ? value : updated[existIdx].examScore
           };
         }
         return updated;
       } else {
-        const studentInfo = students.find(s => s.id === studentId);
         const newRow: StudentGrade = {
           studentId,
           studentName: studentInfo?.name || "Siswa Baru",
-          className: studentInfo?.className || CLASSES[0],
+          className: studentClass,
           assignmentScores: (type === "exam" || type === "midterm" || type === "character") ? {} : { [type]: value },
-          examScore: type === "exam" ? value : 0,
-          midtermScore: type === "midterm" ? value : undefined,
+          examScore: (type === "exam" || isExamMatch) ? value : 0,
+          midtermScore: (type === "midterm" || isMidtermMatch) ? value : undefined,
           characterScore: type === "character" ? value : undefined
         };
         return [...prev, newRow];
       }
     });
+
+    // 2. Synchronize to Submissions & Assignments (Kelola Tugas)
+    if (type !== "character") {
+      let targetAssignmentId = type;
+
+      if (type === "midterm") {
+        let stsAsg = assignments.find(a => 
+          a.className === studentClass && 
+          (a.id === `asg-sts-${studentClass}` || 
+           a.title.toLowerCase().includes("tengah semester") || 
+           a.title.toLowerCase().includes("sts") || 
+           a.title.toLowerCase().includes("pts"))
+        );
+        if (!stsAsg) {
+          const newSts: Assignment = {
+            id: `asg-sts-${studentClass}`,
+            title: "Sumatif Tengah Semester (STS / PTS)",
+            category: "Ulangan",
+            className: studentClass,
+            dueDate: todayStr,
+            maxScore: 100
+          };
+          setAssignments(prev => [...prev, newSts]);
+          targetAssignmentId = newSts.id;
+        } else {
+          targetAssignmentId = stsAsg.id;
+        }
+      } else if (type === "exam") {
+        let sasAsg = assignments.find(a => 
+          a.className === studentClass && 
+          (a.id === `asg-sas-${studentClass}` || 
+           a.title.toLowerCase().includes("akhir semester") || 
+           a.title.toLowerCase().includes("sas") || 
+           a.title.toLowerCase().includes("pas"))
+        );
+        if (!sasAsg) {
+          const newSas: Assignment = {
+            id: `asg-sas-${studentClass}`,
+            title: "Sumatif Akhir Semester (SAS / PAS)",
+            category: "Ulangan",
+            className: studentClass,
+            dueDate: todayStr,
+            maxScore: 100
+          };
+          setAssignments(prev => [...prev, newSas]);
+          targetAssignmentId = newSas.id;
+        } else {
+          targetAssignmentId = sasAsg.id;
+        }
+      }
+
+      setSubmissions(prev => {
+        const studentName = studentInfo?.name || "Siswa";
+        const existIdx = prev.findIndex(s => s.assignmentId === targetAssignmentId && s.studentId === studentId);
+
+        if (existIdx > -1) {
+          const updated = [...prev];
+          updated[existIdx] = {
+            ...updated[existIdx],
+            score: value,
+            status: "Selesai",
+            submittedDate: updated[existIdx].submittedDate || todayStr,
+            studentAnswer: updated[existIdx].studentAnswer || "Dinilai langsung melalui Daftar Nilai"
+          };
+          return updated;
+        } else {
+          const newSub: Submission = {
+            id: `sub-${studentId}-${targetAssignmentId}`,
+            assignmentId: targetAssignmentId,
+            studentId,
+            studentName,
+            submittedDate: todayStr,
+            studentAnswer: "Dinilai langsung melalui Daftar Nilai",
+            score: value,
+            status: "Selesai"
+          };
+          return [...prev, newSub];
+        }
+      });
+    }
   };
 
   // 7. Update Submission Details (Student Answer & AI breakdown)
@@ -2360,7 +2950,10 @@ export default function App() {
         { id: "nilai", label: "Daftar Nilai", icon: FileSpreadsheet },
         { id: "jurnal", label: "Jurnal Harian", icon: BookOpenText },
         ...(user?.role === 'admin'
-            ? [{ id: "manajemen_pengguna", label: "Manajemen Pengguna", icon: Users }] 
+            ? [
+                { id: "manajemen_data", label: "Manajemen Data", icon: Database },
+                { id: "manajemen_pengguna", label: "Manajemen Pengguna", icon: Users }
+              ] 
             : user?.role === 'guru'
             ? [{ id: "verifikasi", label: "Verifikasi Siswa", icon: Users }] 
             : [])
@@ -2922,7 +3515,7 @@ export default function App() {
           {!isStudent && (
             <div className={activeTab === "penilaian" ? "block" : "hidden"}>
               <Penilaian
-                students={students}
+                students={filteredStudents}
                 assignments={assignments}
                 submissions={submissions}
                 grades={grades}
@@ -2930,9 +3523,9 @@ export default function App() {
                 onApplyBatchGrades={handleApplyBatchGrades}
                 onCreateAssignment={handleQuickCreateAssignment}
                 onNavigateToGradebook={() => {
-                  setActiveTab("daftarnilai");
+                  setActiveTab("nilai");
                 }}
-                classList={classList}
+                classList={filteredClassList}
                 onGradingStateChange={handleGradingStateChange}
               />
             </div>
@@ -2957,14 +3550,14 @@ export default function App() {
                       submissions={submissions}
                       grades={grades}
                       materials={materials}
-                      classList={classList}
+                      classList={filteredClassList}
                       onNavigate={(tab) => setActiveTab(tab)}
                       onOpenSettings={() => setIsStudentSettingsOpen(true)}
                     />
                   ) : (
                     <Dashboard
                       schedule={schedule}
-                      students={students}
+                      students={user?.role === 'admin' ? students : filteredStudents}
                       journals={journals}
                       assignments={assignments}
                       attendanceList={attendanceList}
@@ -2975,7 +3568,7 @@ export default function App() {
                       teacherName={teacherName}
                       setTeacherName={setTeacherName}
                       onQuickAction={handleQuickAction}
-                      classList={classList}
+                      classList={user?.role === 'admin' ? classList : filteredClassList}
                     />
                   )
                 )}
@@ -2987,7 +3580,18 @@ export default function App() {
                     onEditMaterial={handleEditMaterial}
                     onDeleteMaterial={handleDeleteMaterial}
                     onAddMaterialNote={handleAddMaterialNote}
-                    classList={classList}
+                    onRestoreMaterials={(newMaterials, mode) => {
+                      if (mode === "replace") {
+                        setMaterials(newMaterials);
+                      } else {
+                        setMaterials(prev => {
+                          const existingIds = new Set(prev.map(p => p.id));
+                          const newUnique = newMaterials.filter(it => !existingIds.has(it.id));
+                          return [...prev, ...newUnique];
+                        });
+                      }
+                    }}
+                    classList={filteredClassList}
                     teacherName={teacherName}
                     currentUserRole={user?.role}
                   />
@@ -2997,14 +3601,25 @@ export default function App() {
                   <EvaluasiSiswa
                     isStudent={isStudent}
                     currentUserRole={user?.role}
-                    availableClasses={classList}
-                    students={students}
+                    availableClasses={filteredClassList}
+                    students={filteredStudents}
                     subject={subject}
                     teacherName={teacherName}
                     bankQuestions={bankQuestions}
                     onAddBankQuestion={(q) => setBankQuestions(prev => [q, ...prev])}
                     onEditBankQuestion={(q) => setBankQuestions(prev => prev.map(item => item.id === q.id ? q : item))}
                     onDeleteBankQuestion={(id) => setBankQuestions(prev => prev.filter(item => item.id !== id))}
+                    onRestoreBankQuestions={(items, mode) => {
+                      if (mode === "replace") {
+                        setBankQuestions(items);
+                      } else {
+                        setBankQuestions(prev => {
+                          const existingIds = new Set(prev.map(p => p.id));
+                          const newUnique = items.filter(it => !existingIds.has(it.id));
+                          return [...prev, ...newUnique];
+                        });
+                      }
+                    }}
                     initialTab={activeTab === "banksoal" ? "bank_soal" : "daftar"}
                   />
                 )}
@@ -3017,8 +3632,8 @@ export default function App() {
                   <WaliKelas
                     homeroomClass={homeroomClass}
                     setHomeroomClass={setHomeroomClass}
-                    classList={classList}
-                    students={students}
+                    classList={filteredClassList}
+                    students={filteredStudents}
                     setStudents={setStudents}
                     attendanceList={attendanceList}
                     assignments={assignments}
@@ -3047,10 +3662,10 @@ export default function App() {
 
                 {activeTab === "absensi" && (
                   <Absensi
-                    students={students}
+                    students={filteredStudents}
                     attendanceList={attendanceList}
                     onSaveAttendance={handleSaveAttendance}
-                    classList={classList}
+                    classList={filteredClassList}
                     schedule={schedule}
                     teacherName={teacherName}
                     nip={nip}
@@ -3101,19 +3716,35 @@ export default function App() {
                       setSchedule([]);
                     }
                   }}
-                  classList={classList}
+                  classList={filteredClassList}
                 />
               )}
 
               {activeTab === "tugas" && (
                 <ManajemenTugas
-                  students={students}
+                  students={filteredStudents}
                   assignments={assignments}
                   submissions={submissions}
+                  grades={grades}
+                  onUpdateGradeCell={handleUpdateGradeCell}
+                  onNavigateToGradebook={(cls) => {
+                    if (cls) safeStorage.setItem("guru_active_class", cls);
+                    setActiveTab("nilai");
+                  }}
                   onAddAssignment={handleAddAssignment}
                   onEditAssignment={handleEditAssignment}
                   onDeleteAssignment={handleDeleteAssignment}
-                  classList={classList}
+                  classList={filteredClassList}
+                  teacherName={teacherName}
+                  nip={nip}
+                  subject={subject}
+                  institution={institution}
+                  headmasterName={headmasterName}
+                  headmasterNip={headmasterNip}
+                  headmasterRank={headmasterRank}
+                  documentCity={documentCity}
+                  schoolNpsn={schoolNpsn}
+                  academicYear={academicYear}
                   onSelectSubmissionToGrade={(assignmentId, submissionId) => {
                     // Navigate directly to the grading tab & seed variables!
                     setActiveTab("penilaian");
@@ -3136,13 +3767,53 @@ export default function App() {
 
               {activeTab === "nilai" && (
                 <DaftarNilai
-                  students={students}
+                  students={filteredStudents}
                   assignments={assignments}
                   submissions={submissions}
                   grades={grades}
                   onUpdateGradeCell={handleUpdateGradeCell}
                   onUpdateSubmission={handleUpdateSubmission}
-                  classList={classList}
+                  onAddAssignment={handleAddAssignment}
+                  onRestoreGrades={(restoredData, mode) => {
+                    if (mode === "replace") {
+                      if (restoredData.grades && restoredData.grades.length > 0) setGrades(restoredData.grades);
+                      if (restoredData.assignments && restoredData.assignments.length > 0) setAssignments(restoredData.assignments);
+                      if (restoredData.submissions && restoredData.submissions.length > 0) setSubmissions(restoredData.submissions);
+                    } else {
+                      if (restoredData.grades && restoredData.grades.length > 0) {
+                        setGrades(prev => {
+                          const existingMap = new Map(prev.map(g => [g.studentId, g]));
+                          restoredData.grades.forEach(g => {
+                            if (existingMap.has(g.studentId)) {
+                              const curr = existingMap.get(g.studentId)!;
+                              existingMap.set(g.studentId, {
+                                ...curr,
+                                assignmentScores: { ...curr.assignmentScores, ...(g.assignmentScores || {}) },
+                                examScore: g.examScore !== undefined ? g.examScore : curr.examScore,
+                                midtermScore: g.midtermScore !== undefined ? g.midtermScore : curr.midtermScore,
+                                characterScore: g.characterScore !== undefined ? g.characterScore : curr.characterScore
+                              });
+                            } else {
+                              existingMap.set(g.studentId, g);
+                            }
+                          });
+                          return Array.from(existingMap.values());
+                        });
+                      }
+                      if (restoredData.assignments && restoredData.assignments.length > 0) {
+                        setAssignments(prev => {
+                          const ids = new Set(prev.map(a => a.id));
+                          const newA = restoredData.assignments.filter(a => !ids.has(a.id));
+                          return [...prev, ...newA];
+                        });
+                      }
+                    }
+                  }}
+                  onNavigateToAssignments={(cls) => {
+                    if (cls) safeStorage.setItem("guru_active_class", cls);
+                    setActiveTab("tugas");
+                  }}
+                  classList={filteredClassList}
                   teacherName={teacherName}
                   nip={nip}
                   subject={subject}
@@ -3162,8 +3833,49 @@ export default function App() {
                   onAddJournal={handleAddJournal}
                   onEditJournal={handleEditJournal}
                   onDeleteJournal={handleDeleteJournal}
-                  classList={classList}
+                  onRestoreJournals={(newJournals, mode) => {
+                    if (mode === "replace") {
+                      setJournals(newJournals);
+                    } else {
+                      setJournals(prev => {
+                        const existingIds = new Set(prev.map(j => j.id));
+                        const newEntries = newJournals.filter(j => !existingIds.has(j.id));
+                        return [...newEntries, ...prev];
+                      });
+                    }
+                  }}
+                  classList={filteredClassList}
                   teacherProfile={teacherProfileObj}
+                />
+              )}
+
+              {activeTab === "manajemen_data" && user?.role === "admin" && (
+                <ManajemenDataSekolah
+                  students={students}
+                  classList={classList}
+                  onAddStudent={handleAddStudentFromAdmin}
+                  onEditStudent={handleSaveStudentEdit}
+                  onDeleteStudent={handleExecuteDeleteStudent}
+                  onBatchDeleteStudents={handleBatchDeleteStudents}
+                  onBatchTransferClass={handleBatchTransferClass}
+                  onImportStudents={handleImportStudents}
+                  onAddClass={handleAddClass}
+                  onRenameClass={handleRenameClass}
+                  onDeleteClass={handleExecuteDeleteClass}
+                  subjects={masterSubjects}
+                  onAddSubject={handleAddSubject}
+                  onEditSubject={handleEditSubject}
+                  onDeleteSubject={handleDeleteSubject}
+                  schoolProfile={schoolMasterProfile}
+                  onUpdateSchoolProfile={handleUpdateSchoolProfile}
+                  onRestoreMasterData={handleRestoreMasterData}
+                  classMetadata={classMetadata}
+                  onUpdateClassMeta={handleUpdateClassMeta}
+                  onSwitchToUserManagement={() => setActiveTab("manajemen_pengguna")}
+                  onSyncStudentsFromAdmin={handleSyncStudentsFromAdmin}
+                  onSaveStudentsToMaster={handleSaveStudentsToMaster}
+                  isSyncingStudents={isSyncingAdminStudents}
+                  syncStudentsMsg={syncAdminStudentsMsg}
                 />
               )}
 
@@ -3172,6 +3884,7 @@ export default function App() {
                   currentUserRole={user.role} 
                   currentUser={user}
                   classList={classList}
+                  onNavigateToDataManagement={() => setActiveTab("manajemen_data")}
                 />
               )}
             </motion.div>
@@ -3190,6 +3903,11 @@ export default function App() {
         {(isStudent ? [
           { id: "dashboard", label: "Beranda", icon: LayoutDashboard },
           { id: "ruangbelajar", label: "Belajar", icon: MonitorPlay },
+          { id: "profil", label: "Profil", icon: User }
+        ] : user?.role === 'admin' ? [
+          { id: "dashboard", label: "Beranda", icon: LayoutDashboard },
+          { id: "manajemen_data", label: "Data", icon: Database },
+          { id: "manajemen_pengguna", label: "Pengguna", icon: Users },
           { id: "profil", label: "Profil", icon: User }
         ] : [
           { id: "dashboard", label: "Beranda", icon: LayoutDashboard },
@@ -3303,7 +4021,7 @@ export default function App() {
                       : "text-slate-500 hover:text-slate-800"
                   }`}
                 >
-                  <Building2 size={14} /> Kelola Kelas ({classList.length})
+                  <Building2 size={14} /> Kelola Kelas ({filteredClassList.length})
                 </button>
                 <button
                   type="button"
@@ -3459,11 +4177,57 @@ export default function App() {
                       </div>
                     </div>
 
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">Pilih Kelas yang Diampu</label>
+                        <button
+                          type="button"
+                          onClick={handleSyncAdminClasses}
+                          disabled={isSyncingAdminClasses}
+                          className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors border border-indigo-200 shadow-2xs"
+                          title="Ambil daftar kelas dari database administrator"
+                        >
+                          <RefreshCw size={11} className={isSyncingAdminClasses ? "animate-spin text-indigo-600" : "text-indigo-600"} />
+                          <span>{isSyncingAdminClasses ? "Memuat..." : "Ambil Data Kelas Admin"}</span>
+                        </button>
+                      </div>
+                      <p className="text-[10px] text-slate-500 font-medium">Centang kelas mana saja yang Anda ajar. Ini akan menyaring tampilan data di dashboard.</p>
+                      
+                      {syncAdminClassesMsg && (
+                        <div className="px-3 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-medium">
+                          {syncAdminClassesMsg}
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 max-h-40 overflow-y-auto p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                        {classList.map(cls => (
+                          <label key={cls} className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={teachingClasses.includes(cls)}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setTeachingClasses(prev => {
+                                  const updated = checked ? [...prev, cls] : prev.filter(c => c !== cls);
+                                  if (user) userUpdateSelfProfile(user.uid, { teachingClasses: updated });
+                                  return updated;
+                                });
+                              }}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-600"
+                            />
+                            <span className="text-sm font-medium text-slate-700">{cls}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+
                     <div className="space-y-1.5">
                       <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">Kelas Binaan (Tugas Wali Kelas)</label>
                       <select
                         value={homeroomClass}
-                        onChange={(e) => setHomeroomClass(e.target.value)}
+                        onChange={(e) => {
+                          setHomeroomClass(e.target.value);
+                          if (user) userUpdateSelfProfile(user.uid, { homeroomClass: e.target.value });
+                        }}
                         className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all text-sm font-bold text-indigo-700 cursor-pointer"
                       >
                         {classList.map(cls => (
@@ -4079,16 +4843,16 @@ export default function App() {
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
                         <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">
-                          Daftar Kelas Terdaftar ({classList.length})
+                          Daftar Kelas Terdaftar ({filteredClassList.length})
                         </label>
-                        {classList.length > 0 && (
+                        {filteredClassList.length > 0 && (
                           <span className="text-[11px] text-slate-400 font-medium">
                             Klik ikon tempat sampah untuk menghapus kelas
                           </span>
                         )}
                       </div>
 
-                      {classList.length === 0 ? (
+                      {filteredClassList.length === 0 ? (
                         <div className="p-6 bg-slate-50 border border-dashed border-slate-300 rounded-2xl text-center space-y-2">
                           <Building2 size={28} className="mx-auto text-slate-400" />
                           <p className="text-xs font-bold text-slate-700">Belum ada kelas terdaftar</p>
@@ -4096,8 +4860,8 @@ export default function App() {
                         </div>
                       ) : (
                         <div className="grid grid-cols-1 gap-2.5">
-                          {classList.map((cls) => {
-                            const classStudentCount = students.filter(s => s.className === cls).length;
+                          {filteredClassList.map((cls) => {
+                            const classStudentCount = filteredStudents.filter(s => s.className === cls).length;
                             const isEditing = editingClassName?.oldName === cls;
                             const isDeleting = deletingClassName === cls;
 
@@ -4260,11 +5024,11 @@ export default function App() {
                     <div className="flex items-center justify-between gap-3">
                       <label className="text-xs font-bold text-slate-600 uppercase">Pilih Kelas:</label>
                       <select
-                        value={selectedStudentClassFilter || classList[0] || ""}
+                        value={selectedStudentClassFilter || filteredClassList[0] || ""}
                         onChange={(e) => setSelectedStudentClassFilter(e.target.value)}
                         className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 cursor-pointer focus:outline-none focus:border-indigo-500"
                       >
-                        {classList.map(c => (
+                        {filteredClassList.map(c => (
                           <option key={c} value={c}>{c}</option>
                         ))}
                       </select>
@@ -4273,7 +5037,7 @@ export default function App() {
                     {/* Add student box */}
                     <div className="p-4 bg-indigo-50/60 rounded-2xl border border-indigo-100 space-y-3">
                       <label className="text-xs font-bold text-indigo-900 uppercase tracking-wide flex items-center gap-1">
-                        <Plus size={14} /> Tambah Siswa Ke Kelas {selectedStudentClassFilter || classList[0] || "-"}
+                        <Plus size={14} /> Tambah Siswa Ke Kelas {selectedStudentClassFilter || filteredClassList[0] || "-"}
                       </label>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         <input 
@@ -4283,7 +5047,7 @@ export default function App() {
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
                               e.preventDefault();
-                              handleAddStudent(newStudentName, newStudentNis, selectedStudentClassFilter || classList[0]);
+                              handleAddStudent(newStudentName, newStudentNis, selectedStudentClassFilter || filteredClassList[0]);
                             }
                           }}
                           placeholder="Nama Lengkap Siswa"
@@ -4296,7 +5060,7 @@ export default function App() {
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
                               e.preventDefault();
-                              handleAddStudent(newStudentName, newStudentNis, selectedStudentClassFilter || classList[0]);
+                              handleAddStudent(newStudentName, newStudentNis, selectedStudentClassFilter || filteredClassList[0]);
                             }
                           }}
                           placeholder="NIS / NISN (Opsional)"
@@ -4305,7 +5069,7 @@ export default function App() {
                       </div>
                       <button
                         type="button"
-                        onClick={() => handleAddStudent(newStudentName, newStudentNis, selectedStudentClassFilter || classList[0])}
+                        onClick={() => handleAddStudent(newStudentName, newStudentNis, selectedStudentClassFilter || filteredClassList[0])}
                         className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1 shadow-xs"
                       >
                         <Plus size={14} /> Tambahkan Siswa
@@ -4426,18 +5190,18 @@ export default function App() {
                     {/* Students list */}
                     <div className="space-y-2">
                       <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">
-                        Daftar Siswa Kelas {selectedStudentClassFilter || classList[0] || "-"} (
-                        {students.filter(s => s.className === (selectedStudentClassFilter || classList[0])).length} siswa)
+                        Daftar Siswa Kelas {selectedStudentClassFilter || filteredClassList[0] || "-"} (
+                        {filteredStudents.filter(s => s.className === (selectedStudentClassFilter || filteredClassList[0])).length} siswa)
                       </label>
                       
-                      {students.filter(s => s.className === (selectedStudentClassFilter || classList[0])).length === 0 ? (
+                      {filteredStudents.filter(s => s.className === (selectedStudentClassFilter || filteredClassList[0])).length === 0 ? (
                         <div className="p-4 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-center text-xs text-slate-400 font-medium">
                           Belum ada siswa di kelas ini. Tambahkan siswa secara manual atau melalui impor Excel.
                         </div>
                       ) : (
                         <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
                           {students
-                            .filter(s => s.className === (selectedStudentClassFilter || classList[0]))
+                            .filter(s => s.className === (selectedStudentClassFilter || filteredClassList[0]))
                             .map((student, sIdx) => {
                               const isEditing = editingStudent?.id === student.id;
                               const isDeleting = deletingStudentId === student.id;

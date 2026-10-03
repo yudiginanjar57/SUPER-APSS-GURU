@@ -16,7 +16,9 @@ import {
   FileText,
   Upload,
   Trash2,
-  ChevronDown
+  ChevronDown,
+  RotateCcw,
+  Database
 } from "lucide-react";
 import { Student, Attendance, AttendanceStatus, ScheduleItem } from "../types";
 import { CLASSES } from "../data/presets";
@@ -27,6 +29,9 @@ import * as jspdfModule from "jspdf";
 const jsPDF = (jspdfModule as any).jsPDF || (jspdfModule as any).default?.jsPDF || (jspdfModule as any).default || jspdfModule;
 import autoTable from "jspdf-autotable";
 import ExportPreviewModal from "./ExportPreviewModal";
+import MenuDataRestoreModal from "./MenuDataRestoreModal";
+import { getStoredTteConfig, renderTteImageHtml, embedTteInJsPdf } from "../lib/tteUtils";
+import { renderKopHeaderHtml } from "../lib/kopUtils";
 
 interface AbsensiProps {
   students: Student[];
@@ -320,6 +325,75 @@ export default function Absensi({
   };
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [previewData, setPreviewData] = useState<any[]>([]);
+  const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
+
+  // Export Attendance JSON Backup
+  const handleExportAttendanceJson = () => {
+    const backupPayload = {
+      app: "EduAsisten",
+      version: "2.5",
+      category: "attendance",
+      exportedAt: new Date().toISOString(),
+      attendanceCount: attendanceList.length,
+      attendanceList: attendanceList
+    };
+    const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Backup_Presensi_EduAsisten_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Restore Attendance Data Handler
+  const handleRestoreAttendanceData = (importedData: any, mode: "merge" | "replace") => {
+    let list: Attendance[] = [];
+    if (Array.isArray(importedData)) {
+      list = importedData;
+    } else if (importedData && Array.isArray(importedData.attendanceList)) {
+      list = importedData.attendanceList;
+    } else if (importedData && Array.isArray(importedData.attendance)) {
+      list = importedData.attendance;
+    }
+
+    if (!Array.isArray(list) || list.length === 0) {
+      return { success: false, message: "Tidak ada data presensi yang valid ditemukan dalam berkas." };
+    }
+
+    // Clean and validate attendance records
+    const validList: Attendance[] = list
+      .filter(item => item && item.studentId && item.date && item.status)
+      .map(item => ({
+        id: item.id || `${item.studentId}-${item.date}`,
+        studentId: item.studentId,
+        date: item.date,
+        status: item.status,
+        className: item.className || activeSelectedClass
+      }));
+
+    if (validList.length === 0) {
+      return { success: false, message: "Format rekaman presensi tidak sesuai dengan standar sistem." };
+    }
+
+    if (mode === "replace") {
+      onSaveAttendance(validList);
+    } else {
+      // Smart merge: keep existing non-conflicting, overwrite or add imported
+      const map = new Map<string, Attendance>();
+      attendanceList.forEach(item => map.set(`${item.studentId}_${item.date}`, item));
+      validList.forEach(item => map.set(`${item.studentId}_${item.date}`, item));
+      onSaveAttendance(Array.from(map.values()));
+    }
+
+    return { 
+      success: true, 
+      count: validList.length, 
+      message: `Berhasil memulihkan ${validList.length} rekaman presensi (${mode === "merge" ? "Gabung & Lengkapi" : "Ganti Keseluruhan"})!` 
+    };
+  };
 
   // Ensure selectedClass remains valid if classList changes
   const activeSelectedClass = availableClasses.includes(selectedClass) 
@@ -756,54 +830,27 @@ export default function Absensi({
 
     const { uniqueDates, studentRows } = getExportDetails();
     const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+    const tteConfig = getStoredTteConfig();
+    const headmasterTteSnippet = tteConfig.usePrincipalTte ? renderTteImageHtml(tteConfig.principalTteImage, "TTE Kepala Sekolah", 48, 120) : "";
+    const teacherTteSnippet = tteConfig.useTeacherTte ? renderTteImageHtml(tteConfig.teacherTteImage, "TTE Guru", 48, 120) : "";
 
-    let headerHtml = "";
-    if (useKop) {
-      if (kopType === "image" && kopImage) {
-        headerHtml = `
-          <div class="header" style="border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; text-align: center;">
-            <img src="${kopImage}" style="max-height: 95px; max-width: 100%; object-fit: contain; referrerPolicy: no-referrer;" />
-          </div>
-        `;
-      } else {
-        headerHtml = `
-          <div class="header" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; min-height: 75px;">
-            <!-- Left Logo Column -->
-            <div style="width: 75px; text-align: left; display: ${kopLogo && (kopLogoPosition === 'left' || kopLogoPosition === 'both') ? 'block' : 'none'};">
-              <img src="${kopLogo}" style="max-height: ${kopLogoSize}px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
-            </div>
-            
-            <!-- Symmetric spacer if only right logo is active -->
-            <div style="width: 75px; display: ${kopLogo && kopLogoPosition === 'right' ? 'block' : 'none'};"></div>
-
-            <!-- Text Lines -->
-            <div style="flex-grow: 1; text-align: center; line-height: 1.25; padding: 0 10px;">
-              <div style="font-size: 11px; font-weight: bold; letter-spacing: 0.5px; margin: 0; text-transform: uppercase; color: #1e293b;">${kopManual.line1}</div>
-              <div style="font-size: 12px; font-weight: bold; letter-spacing: 0.5px; margin: 2px 0 0 0; text-transform: uppercase; color: #1e293b;">${kopManual.line2}</div>
-              <div style="font-size: 16px; font-weight: 800; letter-spacing: 1px; margin: 3px 0 0 0; color: #1e3a8a; text-transform: uppercase;">${kopManual.line3}</div>
-              <div style="font-size: 8.5px; color: #475569; margin: 4px 0 0 0; font-weight: 500;">${kopManual.line4}</div>
-              <div style="font-size: 8.5px; color: #475569; margin: 1px 0 0 0; font-style: italic; font-weight: 500;">${kopManual.line5}</div>
-            </div>
-
-            <!-- Right Logo Column -->
-            <div style="width: 75px; text-align: right; display: ${kopLogo && (kopLogoPosition === 'right' || kopLogoPosition === 'both') ? 'block' : 'none'};">
-              <img src="${kopLogo}" style="max-height: ${kopLogoSize}px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
-            </div>
-
-            <!-- Symmetric spacer if only left logo is active -->
-            <div style="width: 75px; display: ${kopLogo && kopLogoPosition === 'left' ? 'block' : 'none'};"></div>
-          </div>
-        `;
+    const headerHtml = renderKopHeaderHtml({
+      documentTitle: "REKAPITULASI PRESENSI KEHADIRAN SISWA",
+      subtitle: `Mata Pelajaran: <strong>${subject || "Umum"}</strong> • NPSN: ${schoolNpsn || "-" } • Tahun Ajaran: ${academicYear || "-"}`,
+      customConfig: {
+        institution,
+        schoolNpsn,
+        academicYear,
+        subject,
+        useKop,
+        kopType,
+        kopManual,
+        kopImage,
+        kopLogo,
+        kopLogoPosition,
+        kopLogoSize
       }
-    } else {
-      headerHtml = `
-        <div class="header" style="text-align: center; border-bottom: 1px solid #cbd5e1; padding-bottom: 8px; margin-bottom: 12px;">
-          <h2 style="margin: 0; font-size: 14px; font-weight: bold; text-transform: uppercase; color: #0f172a;">REKAPITULASI PRESENSI KEHADIRAN SISWA</h2>
-          <p style="margin: 3px 0 0 0; font-size: 10px; color: #64748b; font-weight: 500;">Sekolah: ${institution.split('\n')[0]} • NPSN: ${schoolNpsn || '-'}</p>
-        </div>
-      `;
-    }
-
+    });
     const html = `
       <!DOCTYPE html>
       <html>
@@ -987,7 +1034,8 @@ export default function Absensi({
         <div class="signatures">
           <div>
             <p>Mengetahui,<br>Kepala Sekolah</p>
-            <div class="sig-box">
+            ${headmasterTteSnippet ? headmasterTteSnippet : ''}
+            <div class="sig-box" style="${headmasterTteSnippet ? 'margin-top: 0;' : ''}">
               ${headmasterName || '( ................................................. )'}
               <br><span style="font-weight: normal; font-size: 9px;">NIP. ${headmasterNip || '-'}</span>
               ${headmasterRank ? `<br><span style="font-weight: normal; font-size: 8px; color: #475569;">${headmasterRank}</span>` : ''}
@@ -995,7 +1043,8 @@ export default function Absensi({
           </div>
           <div>
             <p>${documentCity}, ${dateStr}<br>Guru Mata Pelajaran</p>
-            <div class="sig-box">
+            ${teacherTteSnippet ? teacherTteSnippet : ''}
+            <div class="sig-box" style="${teacherTteSnippet ? 'margin-top: 0;' : ''}">
               ${teacherName}
               <br><span style="font-weight: normal; font-size: 9px;">NIP. ${nip || '-'}</span>
             </div>
@@ -1323,47 +1372,27 @@ export default function Absensi({
     }
 
     const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+    const tteConfig = getStoredTteConfig();
+    const headmasterTteSnippet = tteConfig.usePrincipalTte ? renderTteImageHtml(tteConfig.principalTteImage, "TTE Kepala Sekolah", 48, 120) : "";
+    const teacherTteSnippet = tteConfig.useTeacherTte ? renderTteImageHtml(tteConfig.teacherTteImage, "TTE Guru", 48, 120) : "";
 
-    let headerHtml = "";
-    if (useKop) {
-      if (kopType === "image" && kopImage) {
-        headerHtml = `
-          <div class="header" style="border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; text-align: center;">
-            <img src="${kopImage}" style="max-height: 95px; max-width: 100%; object-fit: contain; referrerPolicy: no-referrer;" />
-          </div>
-        `;
-      } else {
-        headerHtml = `
-          <div class="header" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; min-height: 75px;">
-            <!-- Left Logo Column -->
-            <div style="width: 75px; text-align: left; display: ${kopLogo && (kopLogoPosition === 'left' || kopLogoPosition === 'both') ? 'block' : 'none'};">
-              <img src="${kopLogo}" style="max-height: ${kopLogoSize}px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
-            </div>
-            
-            <!-- Symmetric spacer if only right logo is active -->
-            <div style="width: 75px; display: ${kopLogo && kopLogoPosition === 'right' ? 'block' : 'none'};"></div>
-
-            <!-- Text Lines -->
-            <div style="flex-grow: 1; text-align: center; line-height: 1.25; padding: 0 10px;">
-              <div style="font-size: 11px; font-weight: bold; letter-spacing: 0.5px; margin: 0; text-transform: uppercase; color: #1e293b;">${kopManual.line1}</div>
-              <div style="font-size: 12px; font-weight: bold; letter-spacing: 0.5px; margin: 2px 0 0 0; text-transform: uppercase; color: #1e293b;">${kopManual.line2}</div>
-              <div style="font-size: 16px; font-weight: 800; letter-spacing: 1px; margin: 3px 0 0 0; color: #1e3a8a; text-transform: uppercase;">${kopManual.line3}</div>
-              <div style="font-size: 8.5px; color: #475569; margin: 4px 0 0 0; font-weight: 500;">${kopManual.line4}</div>
-              <div style="font-size: 8.5px; color: #475569; margin: 1px 0 0 0; font-style: italic; font-weight: 500;">${kopManual.line5}</div>
-            </div>
-
-            <!-- Right Logo Column -->
-            <div style="width: 75px; text-align: right; display: ${kopLogo && (kopLogoPosition === 'right' || kopLogoPosition === 'both') ? 'block' : 'none'};">
-              <img src="${kopLogo}" style="max-height: ${kopLogoSize}px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
-            </div>
-            
-            <!-- Symmetric spacer if only left logo is active -->
-            <div style="width: 75px; display: ${kopLogo && kopLogoPosition === 'left' ? 'block' : 'none'};"></div>
-          </div>
-        `;
+    const headerHtml = renderKopHeaderHtml({
+      documentTitle: "RINGKASAN PRESENSI SISWA",
+      subtitle: `Mata Pelajaran: <strong>${subject || "Umum"}</strong> • NPSN: ${schoolNpsn || "-" } • Tahun Ajaran: ${academicYear || "-"}`,
+      customConfig: {
+        institution,
+        schoolNpsn,
+        academicYear,
+        subject,
+        useKop,
+        kopType,
+        kopManual,
+        kopImage,
+        kopLogo,
+        kopLogoPosition,
+        kopLogoSize
       }
-    }
-
+    });
     const available = classList && classList.length > 0 ? classList : CLASSES;
     const isAllSelected = selectedExportClasses.length === available.length;
     const titleText = isAllSelected ? "Ringkasan Presensi Siswa - Semua Kelas" : "Ringkasan Presensi Siswa - Kelas Terpilih";
@@ -1595,7 +1624,8 @@ export default function Absensi({
         <div class="signatures">
           <div>
             <p>Mengetahui,<br>Kepala Sekolah</p>
-            <div class="sig-box">
+            ${headmasterTteSnippet ? headmasterTteSnippet : ''}
+            <div class="sig-box" style="${headmasterTteSnippet ? 'margin-top: 0;' : ''}">
               ${headmasterName || '( ................................................. )'}
               <br><span style="font-weight: normal; font-size: 9px;">NIP. ${headmasterNip || '-'}</span>
               ${headmasterRank ? `<br><span style="font-weight: normal; font-size: 8px; color: #475569;">${headmasterRank}</span>` : ''}
@@ -1603,7 +1633,8 @@ export default function Absensi({
           </div>
           <div>
             <p>${documentCity}, ${dateStr}<br>Guru Mata Pelajaran</p>
-            <div class="sig-box">
+            ${teacherTteSnippet ? teacherTteSnippet : ''}
+            <div class="sig-box" style="${teacherTteSnippet ? 'margin-top: 0;' : ''}">
               ${teacherName}
               <br><span style="font-weight: normal; font-size: 9px;">NIP. ${nip || '-'}</span>
             </div>
@@ -2023,21 +2054,29 @@ export default function Absensi({
       doc.setFontSize(9);
       doc.setFont("helvetica", "normal");
       
+      const tteConfig = getStoredTteConfig();
+
       // Left signature
       doc.text("Mengetahui,", 30, lastY2);
       doc.text("Kepala Sekolah", 30, lastY2 + 5);
+      if (tteConfig.usePrincipalTte && tteConfig.principalTteImage) {
+        embedTteInJsPdf(doc, tteConfig.principalTteImage, 30, lastY2 + 7, 30, 14);
+      }
       doc.setFont("helvetica", "bold");
-      doc.text(headmasterName || "( ................................................. )", 30, lastY2 + 22);
+      doc.text(headmasterName || "( ................................................. )", 30, lastY2 + 24);
       doc.setFont("helvetica", "normal");
-      doc.text(`NIP. ${headmasterNip || "-"}`, 30, lastY2 + 27);
+      doc.text(`NIP. ${headmasterNip || "-"}`, 30, lastY2 + 29);
 
       // Right signature
       doc.text(`${documentCity}, ${dateStr}`, 200, lastY2);
       doc.text("Guru Mata Pelajaran", 200, lastY2 + 5);
+      if (tteConfig.useTeacherTte && tteConfig.teacherTteImage) {
+        embedTteInJsPdf(doc, tteConfig.teacherTteImage, 200, lastY2 + 7, 30, 14);
+      }
       doc.setFont("helvetica", "bold");
-      doc.text(teacherName || "( ................................................. )", 200, lastY2 + 22);
+      doc.text(teacherName || "( ................................................. )", 200, lastY2 + 24);
       doc.setFont("helvetica", "normal");
-      doc.text(`NIP. ${nip || "-"}`, 200, lastY2 + 27);
+      doc.text(`NIP. ${nip || "-"}`, 200, lastY2 + 29);
 
       const filePeriod = exportMode === "monthly" ? selectedMonth : "Keseluruhan";
       const fileLabel = isAllSelected ? "Semua_Kelas" : "Kelas_Terpilih";
@@ -2151,7 +2190,17 @@ export default function Absensi({
         </div>
 
         {/* Shortcuts */}
-        <div className="flex flex-wrap gap-2 w-full md:w-auto justify-end">
+        <div className="flex flex-wrap gap-2 w-full md:w-auto justify-end items-center">
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={() => setIsRestoreModalOpen(true)}
+            className="px-3.5 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200/80 hover:bg-indigo-100 rounded-2xl text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
+            id="btn-restore-attendance"
+            title="Cadangkan atau Pulihkan Rekaman Presensi"
+          >
+            <RotateCcw size={14} className="text-indigo-600" /> Cadangkan / Pulihkan
+          </motion.button>
           <motion.button
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
@@ -2635,6 +2684,18 @@ export default function Absensi({
           </div>
         </div>
       </div>
+
+      {/* Restore & Backup Presensi Modal */}
+      <MenuDataRestoreModal
+        isOpen={isRestoreModalOpen}
+        onClose={() => setIsRestoreModalOpen(false)}
+        menuTitle="Presensi Kehadiran"
+        menuKey="attendance"
+        currentDataCount={attendanceList.length}
+        currentDataSummary={`Mencakup presensi kelas ${availableClasses.join(", ")} per tanggal.`}
+        onExportBackup={handleExportAttendanceJson}
+        onRestoreData={handleRestoreAttendanceData}
+      />
     </div>
   );
 }

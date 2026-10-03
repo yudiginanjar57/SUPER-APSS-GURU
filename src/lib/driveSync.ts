@@ -35,19 +35,37 @@ export interface DriveBackupItem {
   size: string;
 }
 
+export function sanitizeSyncKey(key: string): string {
+  if (!key) return "default";
+  return key.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+}
+
 export async function listDriveBackups(accessToken: string, syncKey: string): Promise<DriveBackupItem[]> {
-  const cleanKey = syncKey.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-  const q = encodeURIComponent(`name contains 'Backup_SuperAppGuru_${cleanKey}' and trashed=false`);
+  const cleanKey = sanitizeSyncKey(syncKey);
+  const rawKey = (syncKey || "").trim().toLowerCase();
+  
+  // Search broadly for any backup file matching Backup_SuperAppGuru in Drive
+  const q = encodeURIComponent(`name contains 'Backup_SuperAppGuru' and trashed=false`);
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,size)&orderBy=createdTime desc`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Gagal mengambil daftar cadangan: ${res.status} ${errText}`);
+    throw new Error(`Gagal mengambil daftar cadangan dari Drive: ${res.status} ${errText}`);
   }
   const data = await res.json();
-  return data.files || [];
+  const files: DriveBackupItem[] = data.files || [];
+
+  if (!rawKey) return files;
+
+  // Filter files matching either cleanKey or raw syncKey, or fallback to returning all files if only 1 exists
+  const matchedFiles = files.filter(file => {
+    const fn = file.name.toLowerCase();
+    return fn.includes(cleanKey) || fn.includes(rawKey) || files.length === 1;
+  });
+
+  return matchedFiles.length > 0 ? matchedFiles : files;
 }
 
 export async function downloadDriveBackup(accessToken: string, fileId: string): Promise<any> {

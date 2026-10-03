@@ -20,20 +20,28 @@ import {
   RotateCcw,
   Edit3,
   X,
-  CheckSquare
+  CheckSquare,
+  Database,
+  FileSignature,
+  CheckCircle2
 } from "lucide-react";
 import { JournalEntry } from "../types";
 import { CLASSES } from "../data/presets";
 import { compressImage } from "../lib/imageUtils";
+import { safeStorage } from "../lib/safeStorage";
 import html2canvas from "html2canvas-pro";
 import * as jspdfModule from "jspdf";
 const jsPDF = (jspdfModule as any).jsPDF || (jspdfModule as any).default?.jsPDF || (jspdfModule as any).default || jspdfModule;
+import MenuDataRestoreModal from "./MenuDataRestoreModal";
+import TteSignatureModal from "./TteSignatureModal";
+import MonthlyJournalExportModal from "./MonthlyJournalExportModal";
 
 interface JurnalHarianProps {
   journals: JournalEntry[];
   onAddJournal: (newJournal: JournalEntry) => void;
   onEditJournal?: (updatedJournal: JournalEntry) => void;
   onDeleteJournal: (id: string) => void;
+  onRestoreJournals?: (items: JournalEntry[], mode: "merge" | "replace") => void;
   classList?: string[];
   teacherProfile?: {
     name: string;
@@ -48,27 +56,31 @@ interface JurnalHarianProps {
     documentCity?: string;
     schoolNpsn?: string;
     academicYear?: string;
+    teacherTteImageUrl?: string;
+    headmasterTteImageUrl?: string;
+    useTte?: boolean;
+    setTeacherTteImageUrl?: (url: string) => void;
+    setHeadmasterTteImageUrl?: (url: string) => void;
+    setUseTte?: (val: boolean) => void;
   };
 }
 
-// Helper to format date into Indonesian (e.g., SENIN, 12 JANUARI 2026)
+// Helper to format date into Indonesian (e.g., 12 JANUARI 2026)
 export function formatIndonesianDate(dateString: string): string {
   if (!dateString) return "";
   const dateObj = new Date(dateString);
   if (isNaN(dateObj.getTime())) return dateString.toUpperCase();
 
-  const days = ["MINGGU", "SENIN", "SELASA", "RABU", "KAMIS", "JUMAT", "SABTU"];
   const months = [
     "JANUARI", "FEBRUARI", "MARET", "APRIL", "MEI", "JUNI",
     "JULI", "AGUSTUS", "SEPTEMBER", "OKTOBER", "NOPEMBER", "DESEMBER"
   ];
 
-  const dayName = days[dateObj.getDay()];
   const dateNum = dateObj.getDate();
   const monthName = months[dateObj.getMonth()];
   const year = dateObj.getFullYear();
 
-  return `${dayName}, ${dateNum} ${monthName} ${year}`;
+  return `${dateNum} ${monthName} ${year}`;
 }
 
 export default function JurnalHarian({
@@ -76,12 +88,138 @@ export default function JurnalHarian({
   onAddJournal,
   onEditJournal,
   onDeleteJournal,
+  onRestoreJournals,
   classList = ["X-MIPA-1", "XI-MIPA-3", "XII-IPS-2", "XI D4", "XI C1"],
   teacherProfile
 }: JurnalHarianProps) {
   const [activeMode, setActiveMode] = useState<"view" | "write">("view");
   const [expandedJournalId, setExpandedJournalId] = useState<string | null>(null);
   const [editingJournalId, setEditingJournalId] = useState<string | null>(null);
+  const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
+  const [isMonthlyExportModalOpen, setIsMonthlyExportModalOpen] = useState(false);
+
+  // TTE (Tanda Tangan Elektronik) State
+  const [teacherTteImageUrl, setTeacherTteImageUrl] = useState<string>(() => {
+    return teacherProfile?.teacherTteImageUrl || safeStorage.getItem("guru_tte_image") || localStorage.getItem("eduasisten_teacher_tte_image") || "";
+  });
+  const [headmasterTteImageUrl, setHeadmasterTteImageUrl] = useState<string>(() => {
+    return teacherProfile?.headmasterTteImageUrl || safeStorage.getItem("guru_headmaster_tte_image") || localStorage.getItem("eduasisten_principal_tte_image") || "";
+  });
+  const [useTte, setUseTte] = useState<boolean>(() => {
+    if (teacherProfile?.useTte !== undefined) return teacherProfile.useTte;
+    const saved = safeStorage.getItem("guru_use_tte");
+    if (saved !== null) return saved === "true";
+    return !!(safeStorage.getItem("guru_tte_image") || localStorage.getItem("eduasisten_teacher_tte_image"));
+  });
+  const [isTteModalOpen, setIsTteModalOpen] = useState(false);
+  const [tteTargetRole, setTteTargetRole] = useState<"guru" | "kepsek">("guru");
+
+  useEffect(() => {
+    if (teacherProfile?.teacherTteImageUrl) {
+      setTeacherTteImageUrl(teacherProfile.teacherTteImageUrl);
+    }
+    if (teacherProfile?.headmasterTteImageUrl) {
+      setHeadmasterTteImageUrl(teacherProfile.headmasterTteImageUrl);
+    }
+    if (teacherProfile?.useTte !== undefined) {
+      setUseTte(teacherProfile.useTte);
+    }
+  }, [teacherProfile?.teacherTteImageUrl, teacherProfile?.headmasterTteImageUrl, teacherProfile?.useTte]);
+
+  const handleSaveTte = (imgUrl: string, enabled: boolean) => {
+    if (tteTargetRole === "guru") {
+      setTeacherTteImageUrl(imgUrl);
+      safeStorage.setItem("guru_tte_image", imgUrl);
+      localStorage.setItem("eduasisten_teacher_tte_image", imgUrl);
+      teacherProfile?.setTeacherTteImageUrl?.(imgUrl);
+    } else {
+      setHeadmasterTteImageUrl(imgUrl);
+      safeStorage.setItem("guru_headmaster_tte_image", imgUrl);
+      localStorage.setItem("eduasisten_principal_tte_image", imgUrl);
+      teacherProfile?.setHeadmasterTteImageUrl?.(imgUrl);
+    }
+    setUseTte(enabled);
+    safeStorage.setItem("guru_use_tte", enabled ? "true" : "false");
+    localStorage.setItem("eduasisten_use_teacher_tte", enabled ? "true" : "false");
+    teacherProfile?.setUseTte?.(enabled);
+  };
+
+  // Export Journals JSON Backup
+  const handleExportJournalsJson = () => {
+    const backupPayload = {
+      app: "EduAsisten",
+      version: "2.5",
+      category: "journals",
+      exportedAt: new Date().toISOString(),
+      journalsCount: journals.length,
+      journals: journals
+    };
+    const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Backup_Jurnal_Harian_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Restore Journals Data Handler
+  const handleRestoreJournalsData = (importedData: any, mode: "merge" | "replace") => {
+    let list: any[] = [];
+    if (Array.isArray(importedData)) {
+      list = importedData;
+    } else if (importedData && Array.isArray(importedData.journals)) {
+      list = importedData.journals;
+    } else if (importedData && Array.isArray(importedData.journalEntries)) {
+      list = importedData.journalEntries;
+    }
+
+    if (!Array.isArray(list) || list.length === 0) {
+      return { success: false, message: "Tidak ditemukan data jurnal harian yang valid dalam berkas." };
+    }
+
+    const validList: JournalEntry[] = list
+      .filter(item => item && item.date && (item.topic || item.notes || item.className || item.summary || item.agenda))
+      .map(item => ({
+        id: item.id || `j-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        date: item.date,
+        className: item.className || (Array.isArray(item.classNames) ? item.classNames.join(', ') : (classList[0] || "X-MIPA-1")),
+        topic: item.topic || (Array.isArray(item.topics) ? item.topics.join(', ') : item.agenda || "Materi Pembelajaran"),
+        notes: item.notes || "",
+        summary: item.summary || item.notes || "",
+        reflection: item.reflection || item.followUp || "",
+        nextSteps: item.nextSteps || "",
+        isAISuggested: Boolean(item.isAISuggested),
+        teacherName: item.teacherName,
+        nip: item.nip,
+        subject: item.subject,
+        month: item.month,
+        weekNum: item.weekNum,
+        photos: Array.isArray(item.photos) ? item.photos : [],
+        photoTimestamps: Array.isArray(item.photoTimestamps) ? item.photoTimestamps : [],
+        documentTitle: item.documentTitle,
+        institution: item.institution,
+        descriptionText: item.descriptionText
+      }));
+
+    if (validList.length === 0) {
+      return { success: false, message: "Format entri jurnal tidak sesuai dengan struktur sistem." };
+    }
+
+    if (onRestoreJournals) {
+      onRestoreJournals(validList, mode);
+    } else {
+      validList.forEach(j => onAddJournal(j));
+    }
+
+    return {
+      success: true,
+      count: validList.length,
+      message: `Berhasil memulihkan ${validList.length} entri jurnal harian (${mode === "merge" ? "Gabung & Lengkapi" : "Ganti Total"})!`
+    };
+  };
 
   // Form main details
   const todayStr = new Date().toISOString().split("T")[0];
@@ -531,8 +669,49 @@ export default function JurnalHarian({
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-slate-400 font-bold flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <motion.button
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={() => setIsMonthlyExportModalOpen(true)}
+            className="px-3.5 py-2 bg-gradient-to-r from-indigo-600 via-indigo-700 to-violet-700 hover:from-indigo-700 hover:to-violet-800 text-white rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-md shadow-indigo-600/25 border border-indigo-500/30 transition-all"
+            id="btn-export-pdf-monthly"
+            title="Ekspor seluruh jurnal harian pada bulan tertentu ke dalam satu dokumen PDF (Multi-Page / Tabel Rekap)"
+          >
+            <Download size={13} className="text-indigo-200" />
+            <span>Ekspor PDF per Bulan</span>
+          </motion.button>
+
+          <motion.button
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={() => {
+              setTteTargetRole("guru");
+              setIsTteModalOpen(true);
+            }}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-2xs border ${
+              useTte && (teacherTteImageUrl || headmasterTteImageUrl)
+                ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                : "bg-indigo-50 text-indigo-700 border-indigo-200/80 hover:bg-indigo-100"
+            }`}
+            id="btn-tte-jurnal"
+            title="Pengaturan Gambar Tanda Tangan Elektronik (TTE) Guru & Kepala Sekolah"
+          >
+            <FileSignature size={13} className={useTte && (teacherTteImageUrl || headmasterTteImageUrl) ? "text-emerald-600" : "text-indigo-600"} />
+            <span>{useTte && (teacherTteImageUrl || headmasterTteImageUrl) ? "TTE Aktif" : "Opsi Gambar TTE"}</span>
+          </motion.button>
+
+          <motion.button
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={() => setIsRestoreModalOpen(true)}
+            className="px-3.5 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200/80 hover:bg-indigo-100 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-2xs"
+            id="btn-restore-journals"
+            title="Cadangkan atau Pulihkan Jurnal Harian"
+          >
+            <RotateCcw size={13} className="text-indigo-600" /> Cadangkan / Pulihkan
+          </motion.button>
+          <span className="text-xs text-slate-400 font-bold flex items-center gap-1 pl-2">
             <BookOpen size={14} className="text-indigo-600" /> {journals.length} Jurnal Tercatat
           </span>
         </div>
@@ -671,9 +850,21 @@ export default function JurnalHarian({
 
                           {/* Signatures Section for Official Document Print */}
                           <div className="flex justify-between items-start mt-6 text-xs font-bold text-black px-4">
-                            <div className="text-center min-w-[200px]">
+                            <div className="text-center min-w-[200px] flex flex-col items-center">
                               <p>Mengetahui,<br />Kepala Sekolah</p>
-                              <div className="mt-12 font-bold">
+                              {useTte && headmasterTteImageUrl?.trim() ? (
+                                <div className="h-16 my-1 flex items-center justify-center">
+                                  <img
+                                    src={headmasterTteImageUrl.trim()}
+                                    alt="TTE Kepala Sekolah"
+                                    className="max-h-14 max-w-[130px] object-contain"
+                                    crossOrigin="anonymous"
+                                  />
+                                </div>
+                              ) : (
+                                <div className="h-12"></div>
+                              )}
+                              <div className="font-bold">
                                 {teacherProfile?.headmasterName || "Dr. Hj. Yanti Suryanti, M.Pd."}
                                 <br />
                                 <span className="font-normal text-[11px]">NIP. {teacherProfile?.headmasterNip || "197005121995122001"}</span>
@@ -685,9 +876,21 @@ export default function JurnalHarian({
                                 )}
                               </div>
                             </div>
-                            <div className="text-center min-w-[200px]">
+                            <div className="text-center min-w-[200px] flex flex-col items-center">
                               <p>{teacherProfile?.documentCity || "Tasikmalaya"}, {formattedDate}<br />Guru Mata Pelajaran</p>
-                              <div className="mt-12 font-bold">
+                              {useTte && teacherTteImageUrl?.trim() ? (
+                                <div className="h-16 my-1 flex items-center justify-center">
+                                  <img
+                                    src={teacherTteImageUrl.trim()}
+                                    alt="TTE Guru"
+                                    className="max-h-14 max-w-[130px] object-contain"
+                                    crossOrigin="anonymous"
+                                  />
+                                </div>
+                              ) : (
+                                <div className="h-12"></div>
+                              )}
+                              <div className="font-bold">
                                 {currentTeacher}
                                 <br />
                                 <span className="font-normal text-[11px]">NIP. {currentNip}</span>
@@ -832,9 +1035,23 @@ export default function JurnalHarian({
 
                                 {/* Signatures Section for Visual Preview */}
                                 <div className="flex justify-between items-start mt-6 text-xs font-bold text-slate-800 px-4">
-                                  <div className="text-center min-w-[200px]">
+                                  <div className="text-center min-w-[200px] flex flex-col items-center">
                                     <p>Mengetahui,<br />Kepala Sekolah</p>
-                                    <div className="mt-12 font-bold">
+                                    {useTte && headmasterTteImageUrl?.trim() ? (
+                                      <div className="h-16 my-1 flex items-center justify-center">
+                                        <img
+                                          src={headmasterTteImageUrl.trim()}
+                                          alt="TTE Kepala Sekolah"
+                                          className="max-h-14 max-w-[130px] object-contain"
+                                          crossOrigin="anonymous"
+                                        />
+                                      </div>
+                                    ) : (
+                                      <div className="h-14 my-1 flex items-center justify-center">
+                                        <span className="text-[10px] text-slate-400 font-normal italic">(Ruang TTD Manual)</span>
+                                      </div>
+                                    )}
+                                    <div className="font-bold">
                                       {teacherProfile?.headmasterName || "Dr. Hj. Yanti Suryanti, M.Pd."}
                                       <br />
                                       <span className="font-normal text-[11px] text-slate-500">NIP. {teacherProfile?.headmasterNip || "197005121995122001"}</span>
@@ -845,14 +1062,49 @@ export default function JurnalHarian({
                                         </>
                                       )}
                                     </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setTteTargetRole("kepsek");
+                                        setIsTteModalOpen(true);
+                                      }}
+                                      className="mt-1.5 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50/70 hover:bg-indigo-100 rounded-lg border border-indigo-200/80 transition-colors flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <FileSignature size={11} /> {useTte && headmasterTteImageUrl ? "Ubah TTE Kepsek" : "+ TTE Kepsek"}
+                                    </button>
                                   </div>
-                                  <div className="text-center min-w-[200px]">
+
+                                  <div className="text-center min-w-[200px] flex flex-col items-center">
                                     <p>{teacherProfile?.documentCity || "Tasikmalaya"}, {formattedDate}<br />Guru Mata Pelajaran</p>
-                                    <div className="mt-14 font-bold">
+                                    {useTte && teacherTteImageUrl?.trim() ? (
+                                      <div className="h-16 my-1 flex items-center justify-center">
+                                        <img
+                                          src={teacherTteImageUrl.trim()}
+                                          alt="TTE Guru"
+                                          className="max-h-14 max-w-[130px] object-contain"
+                                          crossOrigin="anonymous"
+                                        />
+                                      </div>
+                                    ) : (
+                                      <div className="h-14 my-1 flex items-center justify-center">
+                                        <span className="text-[10px] text-slate-400 font-normal italic">(Ruang TTD Manual)</span>
+                                      </div>
+                                    )}
+                                    <div className="font-bold">
                                       {currentTeacher}
                                       <br />
                                       <span className="font-normal text-[11px] text-slate-500">NIP. {currentNip}</span>
                                     </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setTteTargetRole("guru");
+                                        setIsTteModalOpen(true);
+                                      }}
+                                      className="mt-1.5 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50/70 hover:bg-indigo-100 rounded-lg border border-indigo-200/80 transition-colors flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <FileSignature size={11} /> {useTte && teacherTteImageUrl ? "Ubah TTE Guru" : "+ TTE Guru"}
+                                    </button>
                                   </div>
                                 </div>
                               </div>
@@ -1312,9 +1564,23 @@ export default function JurnalHarian({
 
                     {/* Signatures Section for Modal Document Preview */}
                     <div className="flex justify-between items-start mt-6 text-xs font-bold text-black px-4">
-                      <div className="text-center min-w-[200px]">
+                      <div className="text-center min-w-[200px] flex flex-col items-center">
                         <p>Mengetahui,<br />Kepala Sekolah</p>
-                        <div className="mt-12 font-bold">
+                        {useTte && headmasterTteImageUrl?.trim() ? (
+                          <div className="h-16 my-1 flex items-center justify-center">
+                            <img
+                              src={headmasterTteImageUrl.trim()}
+                              alt="TTE Kepala Sekolah"
+                              className="max-h-14 max-w-[130px] object-contain"
+                              crossOrigin="anonymous"
+                            />
+                          </div>
+                        ) : (
+                          <div className="h-14 my-1 flex items-center justify-center">
+                            <span className="text-[10px] text-slate-400 font-normal italic">(Ruang TTD Manual)</span>
+                          </div>
+                        )}
+                        <div className="font-bold">
                           {teacherProfile?.headmasterName || "Dr. Hj. Yanti Suryanti, M.Pd."}
                           <br />
                           <span className="font-normal text-[11px] text-slate-600">NIP. {teacherProfile?.headmasterNip || "197005121995122001"}</span>
@@ -1326,9 +1592,24 @@ export default function JurnalHarian({
                           )}
                         </div>
                       </div>
-                      <div className="text-center min-w-[200px]">
+
+                      <div className="text-center min-w-[200px] flex flex-col items-center">
                         <p>{teacherProfile?.documentCity || "Tasikmalaya"}, {formattedDate}<br />Guru Mata Pelajaran</p>
-                        <div className="mt-14 font-bold">
+                        {useTte && teacherTteImageUrl?.trim() ? (
+                          <div className="h-16 my-1 flex items-center justify-center">
+                            <img
+                              src={teacherTteImageUrl.trim()}
+                              alt="TTE Guru"
+                              className="max-h-14 max-w-[130px] object-contain"
+                              crossOrigin="anonymous"
+                            />
+                          </div>
+                        ) : (
+                          <div className="h-14 my-1 flex items-center justify-center">
+                            <span className="text-[10px] text-slate-400 font-normal italic">(Ruang TTD Manual)</span>
+                          </div>
+                        )}
+                        <div className="font-bold">
                           {currentTeacher}
                           <br />
                           <span className="font-normal text-[11px] text-slate-600">NIP. {currentNip}</span>
@@ -1366,6 +1647,58 @@ export default function JurnalHarian({
           );
         })()}
       </AnimatePresence>
+
+      {/* Restore & Backup Jurnal Modal */}
+      <MenuDataRestoreModal
+        isOpen={isRestoreModalOpen}
+        onClose={() => setIsRestoreModalOpen(false)}
+        menuTitle="Buku Jurnal Harian Guru"
+        menuKey="journals"
+        currentDataCount={journals.length}
+        currentDataSummary={`Mencakup ${journals.length} rekaman jurnal mengajar harian, dokumentasi foto, dan agenda tindak lanjut.`}
+        onExportBackup={handleExportJournalsJson}
+        onRestoreData={handleRestoreJournalsData}
+      />
+
+      {/* TTE Signature Modal */}
+      <TteSignatureModal
+        isOpen={isTteModalOpen}
+        onClose={() => setIsTteModalOpen(false)}
+        targetRole={tteTargetRole}
+        onTargetChange={(target) => setTteTargetRole(target)}
+        currentTteImageUrl={tteTargetRole === "guru" ? teacherTteImageUrl : headmasterTteImageUrl}
+        useTte={useTte}
+        signerName={tteTargetRole === "guru" ? (teacherProfile?.name || "Guru Mata Pelajaran") : (teacherProfile?.headmasterName || "Kepala Sekolah")}
+        signerNip={tteTargetRole === "guru" ? (teacherProfile?.nip || "") : (teacherProfile?.headmasterNip || "")}
+        institution={teacherProfile?.institution || "SMAN 1 INDONESIA"}
+        city={teacherProfile?.documentCity || "Tasikmalaya"}
+        onSave={(imageUrl, enabled, role) => {
+          if (role === "guru") {
+            setTeacherTteImageUrl(imageUrl);
+            safeStorage.setItem("guru_tte_image", imageUrl);
+            localStorage.setItem("eduasisten_teacher_tte_image", imageUrl);
+            teacherProfile?.setTeacherTteImageUrl?.(imageUrl);
+          } else {
+            setHeadmasterTteImageUrl(imageUrl);
+            safeStorage.setItem("guru_headmaster_tte_image", imageUrl);
+            localStorage.setItem("eduasisten_principal_tte_image", imageUrl);
+            teacherProfile?.setHeadmasterTteImageUrl?.(imageUrl);
+          }
+          setUseTte(enabled);
+          safeStorage.setItem("guru_use_tte", enabled ? "true" : "false");
+          localStorage.setItem("eduasisten_use_teacher_tte", enabled ? "true" : "false");
+          teacherProfile?.setUseTte?.(enabled);
+        }}
+      />
+
+      {/* Monthly Journal Export Modal */}
+      <MonthlyJournalExportModal
+        isOpen={isMonthlyExportModalOpen}
+        onClose={() => setIsMonthlyExportModalOpen(false)}
+        journals={journals}
+        classList={classList}
+        teacherProfile={teacherProfile}
+      />
     </div>
   );
 }

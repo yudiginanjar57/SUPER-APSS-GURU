@@ -5,13 +5,15 @@ import { X, FileSpreadsheet, FileText, Printer } from 'lucide-react';
 interface PreviewModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: (type: 'xlsx' | 'pdf' | 'print') => void;
+  onConfirm: (type: 'xlsx' | 'pdf' | 'print', includeSignatures?: boolean) => void;
   data: any[];
   title: string;
   columns: string[];
 }
 
 export default function ExportPreviewModal({ isOpen, onClose, onConfirm, data, title, columns }: PreviewModalProps) {
+  const [includeSignatures, setIncludeSignatures] = React.useState<boolean>(false);
+
   if (!isOpen) return null;
 
   return (
@@ -69,17 +71,34 @@ export default function ExportPreviewModal({ isOpen, onClose, onConfirm, data, t
             </div>
             {data.length > 15 && <p className="text-slate-400 text-xs mt-4">... dan {data.length - 15} baris siswa lainnya</p>}
           </div>
-          <div className="p-5 border-t border-slate-100 flex flex-wrap justify-end gap-3">
-            <button onClick={onClose} className="px-4 py-2 text-slate-600 font-bold text-xs hover:bg-slate-100 rounded-xl cursor-pointer">Batal</button>
-            <button onClick={() => onConfirm('xlsx')} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 cursor-pointer shadow-sm">
-              <FileSpreadsheet size={14} /> Unduh Excel (.XLSX)
-            </button>
-            <button onClick={() => onConfirm('pdf')} className="flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-xl text-xs font-bold hover:bg-rose-700 cursor-pointer shadow-sm">
-              <FileText size={14} /> Unduh File PDF (.PDF)
-            </button>
-            <button onClick={() => onConfirm('print')} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 cursor-pointer shadow-sm">
-              <Printer size={14} /> Cetak Langsung
-            </button>
+          <div className="p-5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 bg-slate-50/50">
+            {/* Opsi TTD */}
+            <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-slate-700 select-none bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs hover:bg-slate-50 transition-colors" id="preview-ttd-toggle-label">
+              <input
+                type="checkbox"
+                checked={includeSignatures}
+                onChange={(e) => setIncludeSignatures(e.target.checked)}
+                className="w-3.5 h-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                id="preview-include-signatures-checkbox"
+              />
+              <span className="font-bold text-slate-800">Sertakan Tanda Tangan (TTD / TTE)</span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded ${includeSignatures ? "bg-emerald-100 text-emerald-800" : "bg-slate-200 text-slate-600"}`}>
+                {includeSignatures ? "Ada TTD" : "Tanpa TTD"}
+              </span>
+            </label>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={onClose} className="px-4 py-2 text-slate-600 font-bold text-xs hover:bg-slate-100 rounded-xl cursor-pointer">Batal</button>
+              <button onClick={() => onConfirm('xlsx', includeSignatures)} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 cursor-pointer shadow-sm">
+                <FileSpreadsheet size={14} /> Unduh Excel (.XLSX)
+              </button>
+              <button onClick={() => onConfirm('pdf', includeSignatures)} className="flex items-center gap-2 px-4 py-2 bg-rose-600 text-white rounded-xl text-xs font-bold hover:bg-rose-700 cursor-pointer shadow-sm">
+                <FileText size={14} /> Unduh File PDF (.PDF)
+              </button>
+              <button onClick={() => onConfirm('print', includeSignatures)} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 cursor-pointer shadow-sm">
+                <Printer size={14} /> Cetak Langsung
+              </button>
+            </div>
           </div>
         </motion.div>
       </motion.div>

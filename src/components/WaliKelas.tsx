@@ -28,13 +28,18 @@ import {
   UserCircle,
   Phone,
   Mail,
-  RotateCw
+  RotateCw,
+  RotateCcw,
+  Database
 } from "lucide-react";
 import { Student, Attendance, Assignment, StudentGrade, HomeroomNote, HomeVisitReport } from "../types";
 import { compressImage } from "../lib/imageUtils";
 import { formatDriveImageUrl } from "../lib/driveUtils";
 import { safeStorage } from "../lib/safeStorage";
 import ExportPreviewModal from "./ExportPreviewModal";
+import MenuDataRestoreModal from "./MenuDataRestoreModal";
+import { getStoredTteConfig, renderTteImageHtml, embedTteInJsPdf } from "../lib/tteUtils";
+import { renderKopHeaderHtml } from "../lib/kopUtils";
 import { utils, writeFile, read } from "xlsx";
 import * as jspdfModule from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -110,6 +115,7 @@ interface WaliKelasProps {
   homeVisits: HomeVisitReport[];
   onAddHomeVisit: (visit: Omit<HomeVisitReport, "id">) => void;
   onDeleteHomeVisit: (id: string) => void;
+  onRestoreHomeroom?: (data: { notes?: HomeroomNote[]; homeVisits?: HomeVisitReport[] }, mode: "merge" | "replace") => void;
   onOpenSettings: () => void;
 }
 
@@ -137,12 +143,86 @@ export default function WaliKelas({
   homeVisits,
   onAddHomeVisit,
   onDeleteHomeVisit,
+  onRestoreHomeroom,
   onOpenSettings
 }: WaliKelasProps) {
   const [activeSubTab, setActiveSubTab] = useState<"siswa" | "profil-siswa" | "rekap-kehadiran" | "home-visit" | "rapor" | "pembinaan" | "perhatian">("siswa");
   const [searchQuery, setSearchQuery] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
+  const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
+  const [selectedStudentIdsForProfile, setSelectedStudentIdsForProfile] = useState<string[]>([]);
+  const [selectedStudentIdsForSiswaTab, setSelectedStudentIdsForSiswaTab] = useState<string[]>([]);
+  const [deleteStudentConfirmModal, setDeleteStudentConfirmModal] = useState<{
+    isOpen: boolean;
+    ids: string[];
+    names: string[];
+    title: string;
+  } | null>(null);
+
+  const handleExecuteDeleteStudents = (ids: string[]) => {
+    if (!ids || ids.length === 0) return;
+    setStudents(students.filter(s => !ids.includes(s.id)));
+    setSelectedStudentIdsForProfile(prev => prev.filter(id => !ids.includes(id)));
+    setSelectedStudentIdsForSiswaTab(prev => prev.filter(id => !ids.includes(id)));
+    if (selectedStudentId && ids.includes(selectedStudentId)) {
+      setSelectedStudentId(null);
+    }
+    setDeleteStudentConfirmModal(null);
+  };
+
+  // Export Homeroom JSON Backup (Notes & Home Visits)
+  const handleExportHomeroomJson = () => {
+    const backupPayload = {
+      app: "EduAsisten",
+      version: "2.5",
+      category: "homeroom",
+      exportedAt: new Date().toISOString(),
+      homeroomClass,
+      notesCount: notes.length,
+      homeVisitsCount: homeVisits.length,
+      notes: notes,
+      homeVisits: homeVisits
+    };
+    const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Backup_Layanan_WaliKelas_${homeroomClass}_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Restore Homeroom Data Handler
+  const handleRestoreHomeroomData = (importedData: any, mode: "merge" | "replace") => {
+    let importedNotes: HomeroomNote[] = [];
+    let importedHomeVisits: HomeVisitReport[] = [];
+
+    if (importedData && typeof importedData === "object") {
+      importedNotes = importedData.notes || importedData.homeroomNotes || [];
+      importedHomeVisits = importedData.homeVisits || importedData.homeVisitReports || [];
+    }
+
+    if (importedNotes.length === 0 && importedHomeVisits.length === 0) {
+      return { success: false, message: "Tidak ditemukan catatan pembinaan atau laporan home visit yang valid." };
+    }
+
+    if (onRestoreHomeroom) {
+      onRestoreHomeroom({ notes: importedNotes, homeVisits: importedHomeVisits }, mode);
+    } else {
+      importedNotes.forEach(n => onAddNote(n));
+      importedHomeVisits.forEach(hv => onAddHomeVisit(hv));
+    }
+
+    const totalCount = importedNotes.length + importedHomeVisits.length;
+    return {
+      success: true,
+      count: totalCount,
+      message: `Berhasil memulihkan data wali kelas (${totalCount} item diproses dalam mode ${mode === "merge" ? "Gabung & Lengkapi" : "Ganti Total"})!`
+    };
+  };
 
   // Month filter for Attendance Recap
   const [selectedMonth, setSelectedMonth] = useState<string>("all");
@@ -396,50 +476,20 @@ export default function WaliKelas({
 
   // Helper to build Kop Sekolah HTML block for printable reports
   const getKopHeaderHtml = () => {
-    if (!useKop) {
-      return `
-        <div class="header" style="text-align: center; border-bottom: 3px double #000; padding-bottom: 10px; margin-bottom: 12px;">
-          <h2 style="margin: 0; font-size: 15px; font-weight: 800; text-transform: uppercase;">${institution.replace('\n', '<br>')}</h2>
-        </div>
-      `;
-    }
-
-    if (kopType === "image" && kopImage) {
-      return `
-        <div class="header" style="border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; text-align: center;">
-          <img src="${kopImage}" style="max-height: 95px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
-        </div>
-      `;
-    }
-
-    return `
-      <div class="header" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; min-height: 75px;">
-        <!-- Left Logo Column -->
-        <div style="width: 75px; text-align: left; display: ${kopLogo && (kopLogoPosition === 'left' || kopLogoPosition === 'both') ? 'block' : 'none'};">
-          <img src="${kopLogo}" style="max-height: ${kopLogoSize}px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
-        </div>
-        
-        <!-- Symmetric spacer if only right logo is active -->
-        <div style="width: 75px; display: ${kopLogo && kopLogoPosition === 'right' ? 'block' : 'none'};"></div>
-
-        <!-- Text Lines -->
-        <div style="flex-grow: 1; text-align: center; line-height: 1.25; padding: 0 10px;">
-          <div style="font-size: 11px; font-weight: bold; letter-spacing: 0.5px; margin: 0; text-transform: uppercase; color: #1e293b;">${kopManual.line1}</div>
-          <div style="font-size: 12px; font-weight: bold; letter-spacing: 0.5px; margin: 2px 0 0 0; text-transform: uppercase; color: #1e293b;">${kopManual.line2}</div>
-          <div style="font-size: 16px; font-weight: 800; letter-spacing: 1px; margin: 3px 0 0 0; color: #1e3a8a; text-transform: uppercase;">${kopManual.line3}</div>
-          <div style="font-size: 8.5px; color: #475569; margin: 4px 0 0 0; font-weight: 500;">${kopManual.line4}</div>
-          <div style="font-size: 8.5px; color: #475569; margin: 1px 0 0 0; font-style: italic; font-weight: 500;">${kopManual.line5}</div>
-        </div>
-
-        <!-- Right Logo Column -->
-        <div style="width: 75px; text-align: right; display: ${kopLogo && (kopLogoPosition === 'right' || kopLogoPosition === 'both') ? 'block' : 'none'};">
-          <img src="${kopLogo}" style="max-height: ${kopLogoSize}px; max-width: 100%; object-fit: contain;" referrerPolicy="no-referrer" />
-        </div>
-        
-        <!-- Symmetric spacer if only left logo is active -->
-        <div style="width: 75px; display: ${kopLogo && kopLogoPosition === 'left' ? 'block' : 'none'};"></div>
-      </div>
-    `;
+    return renderKopHeaderHtml({
+      customConfig: {
+        institution,
+        schoolNpsn,
+        academicYear,
+        useKop,
+        kopType,
+        kopManual,
+        kopImage,
+        kopLogo,
+        kopLogoPosition,
+        kopLogoSize
+      }
+    });
   };
 
   // Automatic Detection of Students Meeting 4 Home Visit Criteria
@@ -763,6 +813,9 @@ export default function WaliKelas({
     const monthLabel = selectedMonth === "all" ? "Keseluruhan Semester" : `Bulan ${selectedMonth}`;
     const { uniqueDates, studentRows } = getExportDetails();
     const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+    const tteConfig = getStoredTteConfig();
+    const headmasterTteSnippet = tteConfig.usePrincipalTte ? renderTteImageHtml(tteConfig.principalTteImage, "TTE Kepala Sekolah", 48, 120) : "";
+    const teacherTteSnippet = tteConfig.useTeacherTte ? renderTteImageHtml(tteConfig.teacherTteImage, "TTE Wali Kelas", 48, 120) : "";
 
     const html = `
       <!DOCTYPE html>
@@ -893,7 +946,8 @@ export default function WaliKelas({
         <div class="signatures">
           <div>
             <p>Mengetahui,<br>Kepala Sekolah</p>
-            <div class="sig-box">
+            ${headmasterTteSnippet ? headmasterTteSnippet : ''}
+            <div class="sig-box" style="${headmasterTteSnippet ? 'margin-top: 0;' : ''}">
               ${headmasterName || '( ................................................. )'}
               <br><span style="font-weight: normal; font-size: 9px;">NIP. ${headmasterNip || '-'}</span>
               ${headmasterRank ? `<br><span style="font-weight: normal; font-size: 8px; color: #475569;">${headmasterRank}</span>` : ''}
@@ -901,7 +955,8 @@ export default function WaliKelas({
           </div>
           <div>
             <p>${documentCity}, ${dateStr}<br>Wali Kelas ${homeroomClass}</p>
-            <div class="sig-box">
+            ${teacherTteSnippet ? teacherTteSnippet : ''}
+            <div class="sig-box" style="${teacherTteSnippet ? 'margin-top: 0;' : ''}">
               ${teacherName}
               <br><span style="font-weight: normal; font-size: 9px;">NIP. ${nip || '-'}</span>
             </div>
@@ -928,6 +983,9 @@ export default function WaliKelas({
     const { studentRows } = getExportDetails();
     const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
     const monthLabel = selectedMonth === "all" ? "Keseluruhan Semester" : `Bulan ${selectedMonth}`;
+    const tteConfig = getStoredTteConfig();
+    const headmasterTteSnippet = tteConfig.usePrincipalTte ? renderTteImageHtml(tteConfig.principalTteImage, "TTE Kepala Sekolah", 48, 120) : "";
+    const teacherTteSnippet = tteConfig.useTeacherTte ? renderTteImageHtml(tteConfig.teacherTteImage, "TTE Wali Kelas", 48, 120) : "";
     
     // 1. Catatan Pembinaan
     const stNotes = notes.filter(n => {
@@ -1083,14 +1141,16 @@ export default function WaliKelas({
         <div class="signatures">
           <div>
             <p>Mengetahui,<br>Kepala Sekolah</p>
-            <div class="sig-box">
+            ${headmasterTteSnippet ? headmasterTteSnippet : ''}
+            <div class="sig-box" style="${headmasterTteSnippet ? 'margin-top: 0;' : ''}">
               ${headmasterName || '( ................................................. )'}
               <br><span style="font-weight: normal; font-size: 10px;">NIP. ${headmasterNip || '-'}</span>
             </div>
           </div>
           <div>
             <p>${documentCity}, ${dateStr}<br>Wali Kelas ${homeroomClass}</p>
-            <div class="sig-box">
+            ${teacherTteSnippet ? teacherTteSnippet : ''}
+            <div class="sig-box" style="${teacherTteSnippet ? 'margin-top: 0;' : ''}">
               ${teacherName}
               <br><span style="font-weight: normal; font-size: 10px;">NIP. ${nip || '-'}</span>
             </div>
@@ -1266,21 +1326,29 @@ export default function WaliKelas({
         doc.setFontSize(9);
         doc.setFont("helvetica", "normal");
         
+        const tteConfig = getStoredTteConfig();
+
         // Left signature
         doc.text("Mengetahui,", 30, lastY2);
         doc.text("Kepala Sekolah", 30, lastY2 + 5);
+        if (tteConfig.usePrincipalTte && tteConfig.principalTteImage) {
+          embedTteInJsPdf(doc, tteConfig.principalTteImage, 30, lastY2 + 7, 30, 14);
+        }
         doc.setFont("helvetica", "bold");
-        doc.text(headmasterName || "( ................................................. )", 30, lastY2 + 22);
+        doc.text(headmasterName || "( ................................................. )", 30, lastY2 + 24);
         doc.setFont("helvetica", "normal");
-        doc.text(`NIP. ${headmasterNip || "-"}`, 30, lastY2 + 27);
+        doc.text(`NIP. ${headmasterNip || "-"}`, 30, lastY2 + 29);
 
         // Right signature
         doc.text(`${documentCity}, ${dateStr}`, 200, lastY2);
         doc.text(`Wali Kelas ${homeroomClass}`, 200, lastY2 + 5);
+        if (tteConfig.useTeacherTte && tteConfig.teacherTteImage) {
+          embedTteInJsPdf(doc, tteConfig.teacherTteImage, 200, lastY2 + 7, 30, 14);
+        }
         doc.setFont("helvetica", "bold");
-        doc.text(teacherName || "( ................................................. )", 200, lastY2 + 22);
+        doc.text(teacherName || "( ................................................. )", 200, lastY2 + 24);
         doc.setFont("helvetica", "normal");
-        doc.text(`NIP. ${nip || "-"}`, 200, lastY2 + 27);
+        doc.text(`NIP. ${nip || "-"}`, 200, lastY2 + 29);
 
         doc.save(`Rekap_Presensi_WaliKelas_${homeroomClass}.pdf`);
       } catch (err) {
@@ -1311,6 +1379,10 @@ export default function WaliKelas({
       alert("Gagal membuka jendela cetak. Izinkan pop-up di peramban Anda.");
       return;
     }
+
+    const tteConfig = getStoredTteConfig();
+    const headmasterTteSnippet = tteConfig.usePrincipalTte ? renderTteImageHtml(tteConfig.principalTteImage, "TTE Kepala Sekolah", 48, 120) : "";
+    const teacherTteSnippet = tteConfig.useTeacherTte ? renderTteImageHtml(tteConfig.teacherTteImage, "TTE Wali Kelas", 48, 120) : "";
 
     const html = `
       <!DOCTYPE html>
@@ -1375,11 +1447,13 @@ export default function WaliKelas({
           </div>
           <div>
             <p>Mengetahui,<br>Kepala Sekolah</p>
-            <div class="sig-box">${headmasterName || '( ........................................ )'}<br><span style="font-weight: normal; font-size: 10px;">NIP. ${headmasterNip || '-'}</span></div>
+            ${headmasterTteSnippet ? headmasterTteSnippet : ''}
+            <div class="sig-box" style="${headmasterTteSnippet ? 'margin-top: 0;' : ''}">${headmasterName || '( ........................................ )'}<br><span style="font-weight: normal; font-size: 10px;">NIP. ${headmasterNip || '-'}</span></div>
           </div>
           <div>
             <p>${documentCity}, ${visit.date}<br>Wali Kelas ${visit.className}</p>
-            <div class="sig-box">${teacherName}<br><span style="font-weight: normal; font-size: 10px;">NIP. ${nip || '-'}</span></div>
+            ${teacherTteSnippet ? teacherTteSnippet : ''}
+            <div class="sig-box" style="${teacherTteSnippet ? 'margin-top: 0;' : ''}">${teacherName}<br><span style="font-weight: normal; font-size: 10px;">NIP. ${nip || '-'}</span></div>
           </div>
         </div>
       </body>
@@ -1398,6 +1472,9 @@ export default function WaliKelas({
     const att = studentAttendanceSummary[student.id] || { hadir: 0, sakit: 0, izin: 0, alpa: 0, total: 0 };
     const acad = studentAcademicSummary[student.id] || { avgAssignment: 0, examScore: 0, finalAvg: 0 };
     const stNotes = notes.filter(n => n.studentId === student.id);
+    const tteConfig = getStoredTteConfig();
+    const headmasterTteSnippet = tteConfig.usePrincipalTte ? renderTteImageHtml(tteConfig.principalTteImage, "TTE Kepala Sekolah", 48, 120) : "";
+    const teacherTteSnippet = tteConfig.useTeacherTte ? renderTteImageHtml(tteConfig.teacherTteImage, "TTE Wali Kelas", 48, 120) : "";
 
     const printWindow = window.open("", "_blank");
     if (!printWindow) {
@@ -1436,11 +1513,26 @@ export default function WaliKelas({
           <p style="margin: 3px 0 0 0; font-size: 11px; color: #475569; font-weight: 500;">Tahun Ajaran 2025/2026 • Semester Genap</p>
         </div>
 
-        <div class="meta-grid">
-          <div class="meta-item"><strong>Nama Siswa:</strong> ${student.name}</div>
-          <div class="meta-item"><strong>NIS / NISN:</strong> ${student.nis}</div>
-          <div class="meta-item"><strong>Kelas:</strong> ${student.className}</div>
-          <div class="meta-item"><strong>Wali Kelas:</strong> ${teacherName} (NIP. ${nip || '-'})</div>
+        <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 20px;">
+          <div style="width: 85px; height: 110px; flex-shrink: 0; border: 1px solid #cbd5e1; border-radius: 6px; padding: 3px; background: #f8fafc; text-align: center; display: flex; align-items: center; justify-content: center; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+            ${student.photo ? `
+              <img src="${formatDriveImageUrl(student.photo)}" alt="${student.name}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 4px; ${student.photoRotation ? `transform: rotate(${student.photoRotation}deg);` : ''}" />
+            ` : `
+              <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; color: #94a3b8; font-size: 10px; font-weight: bold; line-height: 1.2;">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 4px; color: #cbd5e1;">
+                  <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="12" cy="7" r="4"></circle>
+                </svg>
+                FOTO 3x4
+              </div>
+            `}
+          </div>
+          <div class="meta-grid" style="flex: 1; margin-bottom: 0;">
+            <div class="meta-item"><strong>Nama Siswa:</strong> ${student.name}</div>
+            <div class="meta-item"><strong>NIS / NISN:</strong> ${student.nis}</div>
+            <div class="meta-item"><strong>Kelas:</strong> ${student.className}</div>
+            <div class="meta-item"><strong>Wali Kelas:</strong> ${teacherName} (NIP. ${nip || '-'})</div>
+          </div>
         </div>
 
         <div class="section-title">I. REKAPITULASI KEHADIRAN SISWA</div>
@@ -1524,11 +1616,13 @@ export default function WaliKelas({
           </div>
           <div>
             <p>Mengetahui,<br>Kepala Sekolah</p>
-            <div class="sig-box">${headmasterName || '( ................................................. )'}<br><span style="font-weight: normal; font-size: 11px;">NIP. ${headmasterNip || '-'}</span></div>
+            ${headmasterTteSnippet ? headmasterTteSnippet : ''}
+            <div class="sig-box" style="${headmasterTteSnippet ? 'margin-top: 0;' : ''}">${headmasterName || '( ................................................. )'}<br><span style="font-weight: normal; font-size: 11px;">NIP. ${headmasterNip || '-'}</span></div>
           </div>
           <div>
             <p>${documentCity}, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}<br>Wali Kelas ${student.className}</p>
-            <div class="sig-box">${teacherName}<br><span style="font-weight: normal; font-size: 11px;">NIP. ${nip || '-'}</span></div>
+            ${teacherTteSnippet ? teacherTteSnippet : ''}
+            <div class="sig-box" style="${teacherTteSnippet ? 'margin-top: 0;' : ''}">${teacherName}<br><span style="font-weight: normal; font-size: 11px;">NIP. ${nip || '-'}</span></div>
           </div>
         </div>
       </body>
@@ -1701,13 +1795,25 @@ export default function WaliKelas({
               </button>
             </div>
             
-            <button
-              onClick={handlePrintFullReport}
-              className="w-full flex items-center justify-center gap-2 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer border border-indigo-400/30"
-              title="Cetak Laporan Layanan Wali Kelas Lengkap (Presensi, Catatan, Home Visit)"
-            >
-              <Printer size={14} /> Cetak Laporan Lengkap
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsRestoreModalOpen(true)}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-white/20 hover:bg-white/30 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer border border-white/20"
+                title="Cadangkan atau Pulihkan Data Layanan Wali Kelas"
+                id="btn-restore-homeroom"
+              >
+                <RotateCcw size={13} /> Cadangkan / Pulihkan
+              </button>
+
+              <button
+                onClick={handlePrintFullReport}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer border border-indigo-400/30"
+                title="Cetak Laporan Layanan Wali Kelas Lengkap (Presensi, Catatan, Home Visit)"
+              >
+                <Printer size={13} /> Cetak Laporan
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1835,7 +1941,25 @@ export default function WaliKelas({
               />
             </div>
 
-            <div className="flex items-center gap-2 w-full sm:w-auto">
+            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+              {selectedStudentIdsForSiswaTab.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const selectedStudents = filteredStudents.filter(s => selectedStudentIdsForSiswaTab.includes(s.id));
+                    setDeleteStudentConfirmModal({
+                      isOpen: true,
+                      ids: selectedStudentIdsForSiswaTab,
+                      names: selectedStudents.map(s => s.name),
+                      title: `Hapus ${selectedStudentIdsForSiswaTab.length} Siswa Terpilih?`
+                    });
+                  }}
+                  className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
+                >
+                  <Trash2 size={14} /> Hapus Terpilih ({selectedStudentIdsForSiswaTab.length})
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setIsOpenAddNoteModal(true)}
@@ -1851,7 +1975,22 @@ export default function WaliKelas({
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-50/80 border-b border-slate-100 text-slate-500 uppercase tracking-wider font-bold text-[10px]">
-                    <th className="py-3.5 px-4">No</th>
+                    <th className="py-3.5 px-3 text-center w-10">
+                      <input
+                        type="checkbox"
+                        checked={filteredStudents.length > 0 && filteredStudents.every(s => selectedStudentIdsForSiswaTab.includes(s.id))}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedStudentIdsForSiswaTab(filteredStudents.map(s => s.id));
+                          } else {
+                            setSelectedStudentIdsForSiswaTab([]);
+                          }
+                        }}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                        title="Pilih Semua Siswa"
+                      />
+                    </th>
+                    <th className="py-3.5 px-3">No</th>
                     <th className="py-3.5 px-4">Nama Siswa</th>
                     <th className="py-3.5 px-4">NIS</th>
                     <th className="py-3.5 px-4 text-center">Kehadiran (H/S/I/A)</th>
@@ -1863,7 +2002,7 @@ export default function WaliKelas({
                 <tbody className="divide-y divide-slate-100 font-medium">
                   {filteredStudents.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="text-center py-8 text-slate-400 font-semibold">
+                      <td colSpan={8} className="text-center py-8 text-slate-400 font-semibold">
                         Tidak ada siswa terdaftar di kelas {homeroomClass}
                       </td>
                     </tr>
@@ -1885,10 +2024,25 @@ export default function WaliKelas({
                       });
                       const hasSakitAlert = maxConsSakit > 3 || att.sakit >= 15;
                       const hasAlert = att.alpa >= 2 || (att.total > 0 && rate < 85) || hasSakitAlert || notes.some(n => n.studentId === s.id);
+                      const isSelected = selectedStudentIdsForSiswaTab.includes(s.id);
 
                       return (
-                        <tr key={`${s.id}_${index}`} className="hover:bg-slate-50/60 transition-colors">
-                          <td className="py-3.5 px-4 font-bold text-slate-400">{index + 1}</td>
+                        <tr key={`${s.id}_${index}`} className={`hover:bg-slate-50/60 transition-colors ${isSelected ? 'bg-indigo-50/30' : ''}`}>
+                          <td className="py-3.5 px-3 text-center">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedStudentIdsForSiswaTab(prev => [...prev, s.id]);
+                                } else {
+                                  setSelectedStudentIdsForSiswaTab(prev => prev.filter(id => id !== s.id));
+                                }
+                              }}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            />
+                          </td>
+                          <td className="py-3.5 px-3 font-bold text-slate-400">{index + 1}</td>
                           <td className="py-3.5 px-4">
                             <div className="flex items-center gap-2">
                               <span className="font-bold text-slate-800">{s.name}</span>
@@ -1937,6 +2091,21 @@ export default function WaliKelas({
                               >
                                 <Printer size={14} />
                               </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDeleteStudentConfirmModal({
+                                    isOpen: true,
+                                    ids: [s.id],
+                                    names: [s.name],
+                                    title: `Hapus Siswa "${s.name}"?`
+                                  });
+                                }}
+                                className="p-1.5 text-rose-400 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                                title="Hapus Data Siswa"
+                              >
+                                <Trash2 size={14} />
+                              </button>
                             </div>
                           </td>
                         </tr>
@@ -1963,7 +2132,7 @@ export default function WaliKelas({
                     onChange={(e) => setSelectedStudentId(e.target.value)}
                     className="w-full appearance-none pl-4 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 cursor-pointer"
                   >
-                    <option value="" disabled>-- Pilih Siswa --</option>
+                    <option value="">-- Tampilkan Seluruh Siswa Kelas ({classStudents.length}) --</option>
                     {classStudents.map((student) => (
                       <option key={student.id} value={student.id}>
                         {student.name} ({student.nis})
@@ -1974,10 +2143,39 @@ export default function WaliKelas({
                 </div>
               </div>
               <div className="w-full sm:w-auto flex flex-col sm:items-end gap-2">
-                <div className="flex gap-2 w-full sm:w-auto">
+                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                  {selectedStudentIdsForProfile.length > 0 && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const selectedStudents = classStudents.filter(s => selectedStudentIdsForProfile.includes(s.id));
+                          setDeleteStudentConfirmModal({
+                            isOpen: true,
+                            ids: selectedStudentIdsForProfile,
+                            names: selectedStudents.map(s => s.name),
+                            title: `Hapus ${selectedStudentIdsForProfile.length} Siswa Terpilih?`
+                          });
+                        }}
+                        className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer"
+                        title="Hapus semua data siswa yang dicentang"
+                      >
+                        <Trash2 size={14} />
+                        <span>Hapus Siswa Terpilih ({selectedStudentIdsForProfile.length})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedStudentIdsForProfile([])}
+                        className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                      >
+                        Batal Pilih
+                      </button>
+                    </div>
+                  )}
+
                   <button
                     onClick={handleDownloadProfileTemplate}
-                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-3 py-2 bg-white text-indigo-600 hover:bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-sm"
+                    className="flex items-center justify-center gap-2 px-3 py-2 bg-white text-indigo-600 hover:bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-sm"
                     title="Unduh Format Template Profil (XLSX)"
                   >
                     <Download size={14} /> Template
@@ -1991,24 +2189,52 @@ export default function WaliKelas({
                   />
                   <button
                     onClick={() => fileInputRef.current?.click()}
-                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold transition-colors cursor-pointer border border-indigo-200 shadow-sm"
+                    className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold transition-colors cursor-pointer border border-indigo-200 shadow-sm"
                     title="Impor profil & foto dari file Excel. Kolom 'Link Foto' dapat berisi Link Foto Google Drive."
                   >
                     <FileSpreadsheet size={16} />
                     Impor (XLSX)
                   </button>
                 </div>
-                <p className="text-[9px] text-slate-400 text-center sm:text-right w-full sm:max-w-[250px] leading-tight">
-                  Mendukung update otomatis via link Google Drive di kolom Excel.
+                <p className="text-[9px] text-slate-400 text-center sm:text-right w-full sm:max-w-[280px] leading-tight">
+                  Pilih lebih dari 1 siswa dengan centang di tabel untuk hapus massal atau mutasi.
                 </p>
               </div>
             </div>
 
-            {selectedStudentId ? (
-              (() => {
-                const student = classStudents.find(s => s.id === selectedStudentId);
-                if (!student) return null;
-                return (
+            {selectedStudentId && (() => {
+              const student = classStudents.find(s => s.id === selectedStudentId);
+              if (!student) return null;
+              return (
+                <div className="space-y-4 animate-fadeIn">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Detail Profil Siswa Aktif</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteStudentConfirmModal({
+                            isOpen: true,
+                            ids: [student.id],
+                            names: [student.name],
+                            title: `Hapus Data Siswa "${student.name}"?`
+                          });
+                        }}
+                        className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Trash2 size={13} />
+                        <span>Hapus Siswa Ini</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedStudentId(null)}
+                        className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                      >
+                        Tutup Detail
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="flex flex-col md:flex-row gap-6">
                     <div className="w-full md:w-1/3 space-y-4">
                       <div className="bg-slate-50 p-6 rounded-3xl border border-slate-200 flex flex-col items-center text-center relative overflow-hidden">
@@ -2114,37 +2340,6 @@ export default function WaliKelas({
                           </div>
                           <div className="sm:col-span-2">
                             <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1 flex items-center gap-1"><MapPin size={12} /> Alamat Domisili</p>
-                            <p className="text-sm font-semibold text-slate-700">{student.address || '-'}</p>
-                          </div>
-                        </div>
-                        <div className="p-4 bg-slate-50 border-y border-slate-100">
-                          <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wide flex items-center gap-2">
-                            <Users size={14} className="text-indigo-500" /> Data Orang Tua / Wali
-                          </h5>
-                        </div>
-                        <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                          <div>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1">Nama Orang Tua</p>
-                            <p className="text-sm font-semibold text-slate-700 uppercase">{student.parentName || '-'}</p>
-                          </div>
-                          <div>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1 flex items-center gap-1"><Phone size={12} /> No. Telepon / WhatsApp</p>
-                            <div className="flex items-center gap-3">
-                              <p className="text-sm font-semibold text-slate-700">{student.parentPhone || '-'}</p>
-                              {student.parentPhone && (
-                                <a 
-                                  href={`https://wa.me/${student.parentPhone.replace(/\D/g, '').replace(/^0/, '62')}`} 
-                                  target="_blank" 
-                                  rel="noopener noreferrer"
-                                  className="px-2 py-1 bg-green-50 text-green-600 hover:bg-green-100 rounded text-[10px] font-bold transition-colors border border-green-200 flex items-center gap-1 shrink-0"
-                                >
-                                  Chat WA
-                                </a>
-                              )}
-                            </div>
-                          </div>
-                          <div className="sm:col-span-2">
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1 flex items-center gap-1"><MapPin size={12} /> Alamat Domisili</p>
                             <input 
                               type="text"
                               value={student.address || ""}
@@ -2196,14 +2391,163 @@ export default function WaliKelas({
                       </div>
                     </div>
                   </div>
-                );
-              })()
-            ) : (
-              <div className="py-12 text-center text-slate-400 bg-slate-50/50 rounded-2xl border border-slate-100 border-dashed">
-                <UserCircle size={48} className="mx-auto mb-3 opacity-20" />
-                <p className="text-sm font-medium">Pilih siswa di atas untuk melihat detail profil.</p>
+                </div>
+              );
+            })()}
+
+            {/* DAFTAR SISWA & MANAJEMEN DATA PROFIL MASSAL */}
+            <div className="space-y-3 pt-2">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                    <Users size={15} className="text-indigo-600" />
+                    Daftar Profil Siswa Kelas {homeroomClass} ({classStudents.length} Siswa)
+                  </h4>
+                  <p className="text-[11px] text-slate-400 font-medium">
+                    Centang satu atau lebih siswa di bawah untuk melakukan penghapusan data secara bersamaan.
+                  </p>
+                </div>
+                {classStudents.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedStudentIdsForProfile.length === classStudents.length) {
+                          setSelectedStudentIdsForProfile([]);
+                        } else {
+                          setSelectedStudentIdsForProfile(classStudents.map(s => s.id));
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                    >
+                      {selectedStudentIdsForProfile.length === classStudents.length ? 'Batal Pilih Semua' : `Pilih Semua (${classStudents.length})`}
+                    </button>
+                  </div>
+                )}
               </div>
-            )}
+
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-bold text-[10px]">
+                        <th className="py-3 px-3 text-center w-10">
+                          <input
+                            type="checkbox"
+                            checked={classStudents.length > 0 && classStudents.every(s => selectedStudentIdsForProfile.includes(s.id))}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedStudentIdsForProfile(classStudents.map(s => s.id));
+                              } else {
+                                setSelectedStudentIdsForProfile([]);
+                              }
+                            }}
+                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            title="Pilih Semua Siswa"
+                          />
+                        </th>
+                        <th className="py-3 px-3 text-center w-12">Foto</th>
+                        <th className="py-3 px-4">Nama Siswa</th>
+                        <th className="py-3 px-4">NIS</th>
+                        <th className="py-3 px-4 text-center">L/P</th>
+                        <th className="py-3 px-4">Kontak Siswa</th>
+                        <th className="py-3 px-4">Orang Tua</th>
+                        <th className="py-3 px-4 text-center">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-medium">
+                      {classStudents.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="text-center py-10 text-slate-400 font-semibold">
+                            Tidak ada siswa di kelas {homeroomClass}. Silakan gunakan tombol Impor XLSX atau tambah siswa di Manajemen Data.
+                          </td>
+                        </tr>
+                      ) : (
+                        classStudents.map((s) => {
+                          const isSelected = selectedStudentIdsForProfile.includes(s.id);
+                          const isActiveProfile = selectedStudentId === s.id;
+
+                          return (
+                            <tr
+                              key={s.id}
+                              className={`hover:bg-slate-50/70 transition-colors ${
+                                isSelected ? 'bg-indigo-50/40' : isActiveProfile ? 'bg-amber-50/30' : ''
+                              }`}
+                            >
+                              <td className="py-2.5 px-3 text-center">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedStudentIdsForProfile(prev => [...prev, s.id]);
+                                    } else {
+                                      setSelectedStudentIdsForProfile(prev => prev.filter(id => id !== s.id));
+                                    }
+                                  }}
+                                  className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                                />
+                              </td>
+                              <td className="py-2.5 px-3 text-center">
+                                {s.photo ? (
+                                  <img
+                                    src={formatDriveImageUrl(s.photo)}
+                                    alt={s.name}
+                                    className="w-8 h-8 rounded-full object-cover mx-auto border border-slate-200"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                ) : (
+                                  <div className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                                    <UserCircle size={18} />
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4">
+                                <span className="font-bold text-slate-800">{s.name}</span>
+                              </td>
+                              <td className="py-2.5 px-4 font-mono text-slate-500">{s.nis}</td>
+                              <td className="py-2.5 px-4 text-center font-bold text-slate-600">{s.gender || '-'}</td>
+                              <td className="py-2.5 px-4 text-slate-600 font-mono text-[11px]">{s.studentPhone || '-'}</td>
+                              <td className="py-2.5 px-4 text-slate-600">{s.parentName || '-'}</td>
+                              <td className="py-2.5 px-4 text-center">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedStudentId(s.id)}
+                                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                                      isActiveProfile
+                                        ? 'bg-amber-100 text-amber-800'
+                                        : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700'
+                                    }`}
+                                  >
+                                    {isActiveProfile ? 'Sedang Dibuka' : 'Detail'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setDeleteStudentConfirmModal({
+                                        isOpen: true,
+                                        ids: [s.id],
+                                        names: [s.name],
+                                        title: `Hapus Siswa "${s.name}"?`
+                                      });
+                                    }}
+                                    className="p-1 text-rose-400 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                                    title="Hapus Data Siswa"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -2667,22 +3011,40 @@ export default function WaliKelas({
                 <p className="text-xs text-slate-500 font-medium mt-0.5">Tahun Ajaran 2025/2026 • Semester Genap</p>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div className="p-3 bg-white rounded-xl border border-slate-200/80">
-                  <span className="text-slate-400 font-semibold block text-[10px]">NAMA LENGKAP SISWA</span>
-                  <span className="font-extrabold text-slate-800 text-sm">{reportStudent.name}</span>
+              <div className="flex flex-col sm:flex-row items-center gap-4">
+                <div className="w-24 h-32 shrink-0 bg-white p-1 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-center overflow-hidden">
+                  {reportStudent.photo ? (
+                    <img
+                      src={formatDriveImageUrl(reportStudent.photo)}
+                      alt={reportStudent.name}
+                      className="w-full h-full object-cover rounded-xl"
+                      style={{ transform: `rotate(${reportStudent.photoRotation || 0}deg)` }}
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center justify-center text-slate-300">
+                      <UserCircle size={40} strokeWidth={1.5} />
+                      <span className="text-[9px] font-bold text-slate-400 mt-1 uppercase">Foto 3x4</span>
+                    </div>
+                  )}
                 </div>
-                <div className="p-3 bg-white rounded-xl border border-slate-200/80">
-                  <span className="text-slate-400 font-semibold block text-[10px]">NIS / NISN</span>
-                  <span className="font-mono font-extrabold text-slate-800 text-sm">{reportStudent.nis}</span>
-                </div>
-                <div className="p-3 bg-white rounded-xl border border-slate-200/80">
-                  <span className="text-slate-400 font-semibold block text-[10px]">KELAS BINAAN</span>
-                  <span className="font-extrabold text-slate-800 text-sm">{reportStudent.className}</span>
-                </div>
-                <div className="p-3 bg-white rounded-xl border border-slate-200/80">
-                  <span className="text-slate-400 font-semibold block text-[10px]">WALI KELAS</span>
-                  <span className="font-extrabold text-indigo-600 text-sm">{teacherName} (NIP. {nip || "-"})</span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs w-full flex-1">
+                  <div className="p-3 bg-white rounded-xl border border-slate-200/80">
+                    <span className="text-slate-400 font-semibold block text-[10px]">NAMA LENGKAP SISWA</span>
+                    <span className="font-extrabold text-slate-800 text-sm">{reportStudent.name}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-xl border border-slate-200/80">
+                    <span className="text-slate-400 font-semibold block text-[10px]">NIS / NISN</span>
+                    <span className="font-mono font-extrabold text-slate-800 text-sm">{reportStudent.nis}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-xl border border-slate-200/80">
+                    <span className="text-slate-400 font-semibold block text-[10px]">KELAS BINAAN</span>
+                    <span className="font-extrabold text-slate-800 text-sm">{reportStudent.className}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-xl border border-slate-200/80">
+                    <span className="text-slate-400 font-semibold block text-[10px]">WALI KELAS</span>
+                    <span className="font-extrabold text-indigo-600 text-sm">{teacherName} (NIP. {nip || "-"})</span>
+                  </div>
                 </div>
               </div>
 
@@ -3220,6 +3582,67 @@ export default function WaliKelas({
         title={`Rekap Presensi Wali Kelas (Detail & Total) - ${homeroomClass}`}
         columns={previewColumns.length > 0 ? previewColumns : ["NIS", "Nama", "Hadir (H)", "Sakit (S)", "Izin (I)", "Alpa (A)", "Tdk Mengajar (TM)", "Total KBM", "% Kehadiran"]}
       />
+
+      {/* Restore & Backup Layanan Wali Kelas Modal */}
+      <MenuDataRestoreModal
+        isOpen={isRestoreModalOpen}
+        onClose={() => setIsRestoreModalOpen(false)}
+        menuTitle={`Layanan Wali Kelas (${homeroomClass})`}
+        menuKey="homeroom"
+        currentDataCount={notes.length + homeVisits.length}
+        currentDataSummary={`Mencakup ${notes.length} catatan pembinaan & penanganan siswa, serta ${homeVisits.length} laporan kunjungan rumah (home visit) berfoto.`}
+        onExportBackup={handleExportHomeroomJson}
+        onRestoreData={handleRestoreHomeroomData}
+      />
+
+      {/* MODAL KONFIRMASI HAPUS SISWA (TUNGGAL & MASSAL) */}
+      {deleteStudentConfirmModal && deleteStudentConfirmModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fadeIn">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-rose-100 space-y-5">
+            <div className="flex items-center gap-3 text-rose-600">
+              <div className="p-3 bg-rose-100/80 rounded-2xl">
+                <Trash2 size={24} />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-800">{deleteStudentConfirmModal.title}</h3>
+                <p className="text-xs text-slate-500 font-medium">Tindakan ini akan menghapus data siswa dari sistem</p>
+              </div>
+            </div>
+
+            <div className="bg-rose-50/70 border border-rose-200/80 rounded-2xl p-4 text-xs text-rose-800 space-y-2">
+              <p className="font-semibold">
+                Apakah Anda yakin ingin menghapus <strong>{deleteStudentConfirmModal.ids.length} data siswa</strong> ini?
+              </p>
+              <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
+                {deleteStudentConfirmModal.names.map((name, idx) => (
+                  <div key={idx} className="flex items-center justify-between text-[11px] bg-white/80 px-2.5 py-1 rounded-lg border border-rose-100">
+                    <span className="font-bold text-slate-800 truncate">{idx + 1}. {name}</span>
+                    <span className="text-slate-500 font-mono text-[10px] shrink-0">Kelas {homeroomClass}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeleteStudentConfirmModal(null)}
+                className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl font-bold text-xs transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => handleExecuteDeleteStudents(deleteStudentConfirmModal.ids)}
+                className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-black text-xs shadow-md shadow-rose-600/20 transition-all cursor-pointer flex items-center gap-1.5"
+              >
+                <Trash2 size={14} />
+                <span>Ya, Hapus {deleteStudentConfirmModal.ids.length > 1 ? `(${deleteStudentConfirmModal.ids.length})` : ''} Siswa</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

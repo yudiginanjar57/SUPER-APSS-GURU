@@ -1,29 +1,8 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /users/{userId} {
-      allow read, write: if true;
-    }
-
-    match /user_activities/{actId} {
-      allow read, write: if true;
-    }
-
-    match /password_reset_requests/{reqId} {
-      allow read, write: if true;
-    }
-
-    match /guru_data/{document=**} {
-      allow read, write: if true;
-    }
-    
-    match /guru_daily_backups/{document=**} {
-      allow read, write: if true;
-    }
-    
-    match /guru_backup_indexes/{document=**} {
+    match /{document=**} {
       allow read, write: if true;
     }
   }
 }
-

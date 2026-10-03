@@ -58,6 +58,7 @@ interface EvaluasiSiswaProps {
   onAddBankQuestion?: (q: QuestionBankItem) => void;
   onEditBankQuestion?: (q: QuestionBankItem) => void;
   onDeleteBankQuestion?: (id: string) => void;
+  onRestoreBankQuestions?: (items: QuestionBankItem[], mode: "merge" | "replace") => void;
   initialTab?: 'daftar' | 'bank_soal' | 'rekap_guru';
 }
 
@@ -72,6 +73,7 @@ export default function EvaluasiSiswa({
   onAddBankQuestion,
   onEditBankQuestion,
   onDeleteBankQuestion,
+  onRestoreBankQuestions,
   initialTab = 'daftar'
 }: EvaluasiSiswaProps) {
   // 1. Storage State for Evaluations & Submissions
@@ -851,6 +853,7 @@ export default function EvaluasiSiswa({
                 onAddQuestion={onAddBankQuestion || (() => {})}
                 onEditQuestion={onEditBankQuestion || (() => {})}
                 onDeleteQuestion={onDeleteBankQuestion || (() => {})}
+                onRestoreQuestions={onRestoreBankQuestions}
                 availableClasses={availableClasses}
                 subject={subject}
               />

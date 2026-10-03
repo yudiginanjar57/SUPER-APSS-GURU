@@ -32,7 +32,13 @@ import {
   SlidersHorizontal,
   ChevronRight,
   ChevronDown,
-  Ban
+  Ban,
+  Database,
+  BookOpen,
+  Layers,
+  FolderKanban,
+  CalendarDays,
+  Award
 } from 'lucide-react';
 import { db, handleFirestoreError, OperationType, isFirestoreQuotaExceeded } from '../lib/firebaseClient';
 import { formatDriveImageUrl } from '../lib/driveUtils';
@@ -56,15 +62,17 @@ interface Props {
   currentUserRole: 'admin' | 'guru' | 'siswa';
   currentUser?: AppUser | null;
   classList?: string[];
+  onNavigateToDataManagement?: () => void;
 }
 
 export default function ManajemenPengguna({ 
   currentUserRole, 
   currentUser,
-  classList = ["X-1", "X-2", "XI-1", "XI-2", "XII-1", "XII-2"] 
+  classList = ["X-1", "X-2", "XI-1", "XI-2", "XII-1", "XII-2"],
+  onNavigateToDataManagement
 }: Props) {
   // Navigation & subtabs
-  const [activeTab, setActiveTab] = useState<'users' | 'verification' | 'activities' | 'reset_requests'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'verification' | 'activities' | 'reset_requests' | 'big_data'>('users');
   
   // Data state
   const [users, setUsers] = useState<AppUser[]>([]);
@@ -73,6 +81,12 @@ export default function ManajemenPengguna({
   const [isLoading, setIsLoading] = useState(true);
   const [isActivitiesLoading, setIsActivitiesLoading] = useState(true);
   const [isResetReqLoading, setIsResetReqLoading] = useState(true);
+
+  // Big Data state for Administrator Hub
+  const [guruDatabases, setGuruDatabases] = useState<any[]>([]);
+  const [isBigDataLoading, setIsBigDataLoading] = useState(false);
+  const [selectedGuruDbDetail, setSelectedGuruDbDetail] = useState<any | null>(null);
+  const [bigDataClassFilter, setBigDataClassFilter] = useState<string>('all');
   
   // Filters & search
   const [searchQuery, setSearchQuery] = useState('');
@@ -108,7 +122,12 @@ export default function ManajemenPengguna({
     nisn: '',
     phone: '',
     institution: 'SMA Negeri 2 Tasikmalaya',
-    kelas: classList[0] || 'X-1'
+    kelas: classList[0] || 'X-1',
+    subject: 'Ekonomi',
+    teachingClasses: [classList[0] || 'X-1'],
+    homeroomClass: '',
+    gender: 'L',
+    attendanceNumber: '1'
   });
 
   const [editForm, setEditForm] = useState({
@@ -121,7 +140,12 @@ export default function ManajemenPengguna({
     nisn: '',
     phone: '',
     institution: '',
-    kelas: ''
+    kelas: '',
+    subject: '',
+    teachingClasses: [] as string[],
+    homeroomClass: '',
+    gender: '',
+    attendanceNumber: ''
   });
 
   const [newPassword, setNewPassword] = useState('');
@@ -142,6 +166,8 @@ export default function ManajemenPengguna({
       const fetched: AppUser[] = [];
       snapshot.forEach((docSnap) => {
         const d = docSnap.data();
+        const cleanEmail = (d.email || '').trim().toLowerCase();
+        const derivedKey = d.databaseKey || (d.role === 'guru' && cleanEmail ? `guru_${cleanEmail.replace(/[^a-z0-9_]/g, '_')}` : undefined);
         fetched.push({
           uid: docSnap.id,
           username: d.username || d.email || docSnap.id,
@@ -157,7 +183,13 @@ export default function ManajemenPengguna({
           nisn: d.nisn || '',
           phone: d.phone || '',
           institution: d.institution || '',
-          kelas: d.kelas || ''
+          kelas: d.kelas || '',
+          subject: d.subject || '',
+          teachingClasses: Array.isArray(d.teachingClasses) ? d.teachingClasses : [],
+          homeroomClass: d.homeroomClass || '',
+          gender: d.gender || '',
+          attendanceNumber: d.attendanceNumber || '',
+          databaseKey: derivedKey
         });
       });
       // Sort users: admins first, then guru, then siswa
@@ -178,6 +210,25 @@ export default function ManajemenPengguna({
 
     return () => unsubscribe();
   }, []);
+
+  // 1b. Realtime Listen to Guru Databases for Admin Big Data Hub
+  useEffect(() => {
+    if (currentUserRole !== 'admin' || isFirestoreQuotaExceeded()) return;
+    setIsBigDataLoading(true);
+    const qGuru = query(collection(db, 'guru_data'));
+    const unsubGuru = onSnapshot(qGuru, (snapshot) => {
+      const gList: any[] = [];
+      snapshot.forEach((d) => {
+        gList.push({ id: d.id, ...d.data() });
+      });
+      setGuruDatabases(gList);
+      setIsBigDataLoading(false);
+    }, (err) => {
+      console.warn("Could not fetch guru_data collection:", err);
+      setIsBigDataLoading(false);
+    });
+    return () => unsubGuru();
+  }, [currentUserRole]);
 
   // 2. Realtime Listen to Activity Logs
   useEffect(() => {
@@ -480,7 +531,12 @@ export default function ManajemenPengguna({
       nisn: user.nisn || '',
       phone: user.phone || '',
       institution: user.institution || '',
-      kelas: user.kelas || ''
+      kelas: user.kelas || '',
+      subject: user.subject || '',
+      teachingClasses: user.teachingClasses || [],
+      homeroomClass: user.homeroomClass || '',
+      gender: user.gender || 'L',
+      attendanceNumber: user.attendanceNumber ? String(user.attendanceNumber) : ''
     });
     setIsEditModalOpen(true);
   };
@@ -547,7 +603,12 @@ export default function ManajemenPengguna({
         nisn: '',
         phone: '',
         institution: 'SMA Negeri 2 Tasikmalaya',
-        kelas: classList[0] || 'X-1'
+        kelas: classList[0] || 'X-1',
+        subject: '',
+        teachingClasses: [],
+        homeroomClass: '',
+        gender: 'L',
+        attendanceNumber: ''
       });
       notifySuccess(`Akun ${created.name} (@${created.username}) berhasil dibuat dan langsung aktif.`);
     } catch (err: any) {
@@ -583,7 +644,21 @@ export default function ManajemenPengguna({
       return;
     }
 
-    const headers = ["Nama Lengkap", "Username", "Email", "Peran", "Status", "NIP/NISN", "Kelas", "Terdaftar Pada", "Login Terakhir"];
+    const headers = [
+      "Nama Lengkap", 
+      "Username", 
+      "Email", 
+      "Peran", 
+      "Status", 
+      "NIP / NISN", 
+      "Mata Pelajaran",
+      "Kelas yang Diajar",
+      "Wali Kelas",
+      "Kelas Siswa", 
+      "Database Partition Key",
+      "Terdaftar Pada", 
+      "Login Terakhir"
+    ];
     const rows = filteredUsers.map(u => [
       `"${u.name.replace(/"/g, '""')}"`,
       `"${u.username}"`,
@@ -591,7 +666,11 @@ export default function ManajemenPengguna({
       `"${u.role.toUpperCase()}"`,
       `"${u.status.toUpperCase()}"`,
       `"${u.nip || u.nisn || '-'}"`,
+      `"${u.subject || '-'}"`,
+      `"${(u.teachingClasses || []).join('; ') || '-'}"`,
+      `"${u.homeroomClass || '-'}"`,
       `"${u.kelas || '-'}"`,
+      `"${u.databaseKey || '-'}"`,
       `"${u.createdAt?.toDate ? u.createdAt.toDate().toLocaleDateString('id-ID') : '-'}"`,
       `"${u.lastLogin?.toDate ? u.lastLogin.toDate().toLocaleString('id-ID') : '-'}"`
     ]);
@@ -605,6 +684,70 @@ export default function ManajemenPengguna({
     link.click();
     document.body.removeChild(link);
     notifySuccess("File CSV daftar pengguna berhasil diunduh.");
+  };
+
+  // Export Big Data School Administration to JSON
+  const handleExportBigDataJSON = () => {
+    const bigDataPayload = {
+      exportedAt: new Date().toISOString(),
+      schoolName: "SMA Negeri 2 Tasikmalaya",
+      totalUsers: users.length,
+      totalGuru: users.filter(u => u.role === 'guru').length,
+      totalSiswa: users.filter(u => u.role === 'siswa').length,
+      summary: {
+        totalGuruActive: users.filter(u => u.role === 'guru' && u.status === 'approved').length,
+        totalSiswaActive: users.filter(u => u.role === 'siswa' && u.status === 'approved').length,
+        totalDatabases: guruDatabases.length,
+        classesDistribution: classList.map(c => ({
+          kelas: c,
+          totalSiswa: users.filter(u => u.role === 'siswa' && u.kelas === c).length,
+          teachers: users.filter(u => u.role === 'guru' && u.teachingClasses?.includes(c)).map(t => ({
+            name: t.name,
+            subject: t.subject
+          }))
+        }))
+      },
+      users: users.map(u => ({
+        name: u.name,
+        username: u.username,
+        email: u.email,
+        role: u.role,
+        status: u.status,
+        nip: u.nip || undefined,
+        nisn: u.nisn || undefined,
+        phone: u.phone || undefined,
+        subject: u.subject || undefined,
+        teachingClasses: u.teachingClasses || undefined,
+        homeroomClass: u.homeroomClass || undefined,
+        kelas: u.kelas || undefined,
+        gender: u.gender || undefined,
+        attendanceNumber: u.attendanceNumber || undefined,
+        databaseKey: u.databaseKey || undefined
+      })),
+      teacherDatabases: guruDatabases.map(g => ({
+        databaseKey: g.id,
+        teacherName: g.teacherName || '-',
+        nip: g.nip || '-',
+        subject: g.subject || '-',
+        studentsCount: Array.isArray(g.students) ? g.students.length : 0,
+        gradesCount: Array.isArray(g.grades) ? g.grades.length : 0,
+        attendanceCount: Array.isArray(g.attendanceList) ? g.attendanceList.length : 0,
+        journalsCount: Array.isArray(g.journals) ? g.journals.length : 0,
+        materialsCount: Array.isArray(g.materials) ? g.materials.length : 0,
+        lastUpdated: g.lastUpdated
+      }))
+    };
+
+    const blob = new Blob([JSON.stringify(bigDataPayload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `BigData_Administrasi_Sekolah_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    notifySuccess("Big Data administrasi sekolah berhasil diekspor ke format JSON.");
   };
 
   const copyPasswordToClipboard = () => {
@@ -671,7 +814,12 @@ export default function ManajemenPengguna({
                     nisn: '',
                     phone: '',
                     institution: 'SMA Negeri 2 Tasikmalaya',
-                    kelas: classList[0] || 'X-1'
+                    kelas: classList[0] || 'X-1',
+                    subject: '',
+                    teachingClasses: [],
+                    homeroomClass: '',
+                    gender: 'L',
+                    attendanceNumber: ''
                   });
                   setIsCreateModalOpen(true);
                 }}
@@ -845,6 +993,34 @@ export default function ManajemenPengguna({
                 </span>
               )}
             </button>
+
+            {currentUserRole === 'admin' && (
+              <button
+                onClick={() => setActiveTab('big_data')}
+                className={`px-4 py-2.5 text-xs font-black rounded-xl transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+                  activeTab === 'big_data'
+                    ? 'bg-indigo-600 text-white shadow-xs'
+                    : 'text-indigo-700 bg-indigo-50/70 hover:bg-indigo-100/80'
+                }`}
+              >
+                <Database size={15} />
+                <span>Pusat Big Data Sekolah</span>
+                <span className="px-1.5 py-0.2 bg-indigo-500/20 text-indigo-700 rounded-md text-[9px] font-black">
+                  Hub
+                </span>
+              </button>
+            )}
+
+            {currentUserRole === 'admin' && onNavigateToDataManagement && (
+              <button
+                onClick={onNavigateToDataManagement}
+                className="px-4 py-2.5 text-xs font-black rounded-xl transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200"
+                title="Buka Manajemen Data Siswa, Kelas & Pelajaran"
+              >
+                <FolderKanban size={15} className="text-emerald-600" />
+                <span>Manajemen Data (Siswa, Kelas, Mapel)</span>
+              </button>
+            )}
           </div>
 
           {/* Search Box */}
@@ -1015,9 +1191,43 @@ export default function ManajemenPengguna({
                                 )}
                               </div>
                               <p className="text-[11px] text-slate-500 font-mono">@{u.username}</p>
-                              <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
+                              <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[10px] text-slate-400">
                                 {u.email && <span>{u.email}</span>}
-                                {u.kelas && <span className="font-bold text-sky-600 bg-sky-50 px-1.5 rounded">Kelas {u.kelas}</span>}
+                                {u.role === 'guru' && u.subject && (
+                                  <span className="font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-100">
+                                    Mapel: {u.subject}
+                                  </span>
+                                )}
+                                {u.role === 'guru' && u.teachingClasses && u.teachingClasses.length > 0 && (
+                                  <span className="text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded font-medium">
+                                    Mengajar: {u.teachingClasses.join(', ')}
+                                  </span>
+                                )}
+                                {u.role === 'guru' && u.homeroomClass && (
+                                  <span className="text-amber-700 bg-amber-50 px-1.5 py-0.2 rounded font-bold border border-amber-200">
+                                    Wali: {u.homeroomClass}
+                                  </span>
+                                )}
+                                {u.role === 'guru' && u.databaseKey && (
+                                  <span className="text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded font-mono font-bold border border-emerald-200" title="Partisi Database Mandiri di Firestore">
+                                    DB: {u.databaseKey}
+                                  </span>
+                                )}
+                                {u.role === 'siswa' && u.kelas && (
+                                  <span className="font-bold text-sky-600 bg-sky-50 px-1.5 py-0.2 rounded">
+                                    Kelas {u.kelas}
+                                  </span>
+                                )}
+                                {u.role === 'siswa' && u.attendanceNumber && (
+                                  <span className="text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded font-bold">
+                                    No #{u.attendanceNumber}
+                                  </span>
+                                )}
+                                {u.role === 'siswa' && u.gender && (
+                                  <span className="text-slate-500 bg-slate-100 px-1.5 py-0.2 rounded text-[9px]">
+                                    {u.gender === 'L' ? 'Laki-laki' : 'Perempuan'}
+                                  </span>
+                                )}
                                 {u.nip && <span className="font-bold text-indigo-600">NIP. {u.nip}</span>}
                                 {u.nisn && <span className="font-bold text-sky-600">NISN. {u.nisn}</span>}
                               </div>
@@ -1178,55 +1388,117 @@ export default function ManajemenPengguna({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-xs">
-                    {pendingUsers.map((u) => (
-                      <tr key={u.uid} className="hover:bg-slate-50/70 transition-colors">
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-3.5">
-                            <div className={`w-10 h-10 rounded-2xl flex items-center justify-center font-black text-sm text-white shrink-0 ${
-                              u.role === 'guru' ? 'bg-indigo-600' : 'bg-sky-500'
+                    {pendingUsers.map((u) => {
+                      const cleanEmail = (u.email || '').trim().toLowerCase();
+                      const targetDbKey = u.databaseKey || (u.role === 'guru' && cleanEmail ? `guru_${cleanEmail.replace(/[^a-z0-9_]/g, '_')}` : null);
+
+                      return (
+                        <tr key={u.uid} className="hover:bg-slate-50/70 transition-colors">
+                          <td className="px-6 py-4">
+                            <div className="flex items-start gap-3.5">
+                              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center font-black text-sm text-white shrink-0 mt-1 ${
+                                u.role === 'guru' ? 'bg-indigo-600 shadow-xs' : 'bg-sky-500 shadow-xs'
+                              }`}>
+                                {u.name.charAt(0).toUpperCase()}
+                              </div>
+                              <div className="space-y-1.5">
+                                <div>
+                                  <p className="font-black text-slate-800 text-sm">{u.name}</p>
+                                  <p className="text-[11px] text-slate-500 font-mono">@{u.username} • {u.email}</p>
+                                </div>
+
+                                {/* Form Submission Details */}
+                                {u.role === 'guru' ? (
+                                  <div className="p-2.5 bg-indigo-50/70 rounded-xl border border-indigo-100 text-[11px] text-indigo-950 space-y-1">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-bold text-indigo-900">Mapel:</span>
+                                      <span className="font-semibold bg-white px-2 py-0.5 rounded border border-indigo-200 text-indigo-700">
+                                        {u.subject || 'Belum diisi'}
+                                      </span>
+                                      {u.nip && <span className="text-indigo-800 font-mono">NIP. {u.nip}</span>}
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                                      <span className="font-bold text-indigo-900">Kelas yang Diajar:</span>
+                                      {(u.teachingClasses && u.teachingClasses.length > 0) ? (
+                                        u.teachingClasses.map(cls => (
+                                          <span key={cls} className="px-1.5 py-0.2 bg-white text-indigo-700 font-bold rounded text-[10px] border border-indigo-200">
+                                            {cls}
+                                          </span>
+                                        ))
+                                      ) : (
+                                        <span className="text-slate-400 italic">Belum dipilih</span>
+                                      )}
+                                      {u.homeroomClass && (
+                                        <span className="px-2 py-0.2 bg-amber-100 text-amber-800 font-bold rounded text-[10px]">
+                                          Wali Kelas {u.homeroomClass}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {targetDbKey && (
+                                      <div className="pt-1 border-t border-indigo-100 flex items-center gap-1.5 text-[10px] text-emerald-800 font-medium">
+                                        <Database size={11} className="text-emerald-600" />
+                                        <span>Target Database Mandiri: <code className="font-mono font-bold bg-white px-1.5 py-0.2 rounded border border-emerald-300 text-emerald-700">{targetDbKey}</code> (otomatis diinisialisasi saat disetujui)</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div className="p-2.5 bg-sky-50/70 rounded-xl border border-sky-100 text-[11px] text-sky-950 space-y-1">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-bold text-sky-900">Masuk Kelas:</span>
+                                      <span className="font-bold bg-white px-2 py-0.5 rounded border border-sky-200 text-sky-700">
+                                        {u.kelas ? `Kelas ${u.kelas}` : 'Belum dipilih'}
+                                      </span>
+                                      {u.attendanceNumber && (
+                                        <span className="text-sky-800 font-bold">No. Absen: #{u.attendanceNumber}</span>
+                                      )}
+                                      {u.gender && (
+                                        <span className="text-sky-700">Jenis Kelamin: {u.gender === 'L' ? 'Laki-laki' : 'Perempuan'}</span>
+                                      )}
+                                    </div>
+                                    {u.nisn && (
+                                      <div className="text-[10px] text-slate-500 font-mono">
+                                        NISN: {u.nisn}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 align-top">
+                            <span className={`px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider ${
+                              u.role === 'guru' ? 'bg-indigo-50 text-indigo-700 border border-indigo-100' : 'bg-sky-50 text-sky-700 border border-sky-100'
                             }`}>
-                              {u.name.charAt(0).toUpperCase()}
+                              {u.role === 'guru' ? 'Guru (Pengajar)' : 'Siswa (Peserta Didik)'}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-slate-500 align-top">
+                            <div className="flex items-center gap-1.5 text-xs font-medium">
+                              <Clock size={13} className="text-slate-400" />
+                              <span>{formatTimestamp(u.createdAt)}</span>
                             </div>
-                            <div>
-                              <p className="font-black text-slate-800">{u.name}</p>
-                              <p className="text-[11px] text-slate-500 font-mono">@{u.username}</p>
-                              <p className="text-[10px] text-slate-400">{u.email}</p>
+                          </td>
+                          <td className="px-6 py-4 text-right align-top">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => handleQuickStatusChange(u, 'rejected')}
+                                className="px-3.5 py-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-xl font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                title="Tolak Pendaftaran Akun"
+                              >
+                                <XCircle size={14} /> Tolak
+                              </button>
+                              <button
+                                onClick={() => handleQuickStatusChange(u, 'approved')}
+                                className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+                                title="Setujui dan Inisialisasi Database Guru"
+                              >
+                                <CheckCircle2 size={14} /> Setujui & Aktifkan
+                              </button>
                             </div>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className={`px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider ${
-                            u.role === 'guru' ? 'bg-indigo-50 text-indigo-700 border border-indigo-100' : 'bg-sky-50 text-sky-700 border border-sky-100'
-                          }`}>
-                            {u.role}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-slate-500">
-                          <div className="flex items-center gap-1.5 text-xs font-medium">
-                            <Clock size={13} className="text-slate-400" />
-                            <span>{formatTimestamp(u.createdAt)}</span>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 text-right">
-                          <div className="flex items-center justify-end gap-2">
-                            <button
-                              onClick={() => handleQuickStatusChange(u, 'rejected')}
-                              className="px-3.5 py-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-xl font-bold transition-all flex items-center gap-1 cursor-pointer"
-                              title="Tolak Pendaftaran Akun"
-                            >
-                              <XCircle size={14} /> Tolak
-                            </button>
-                            <button
-                              onClick={() => handleQuickStatusChange(u, 'approved')}
-                              className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-                              title="Setujui dan Aktifkan Akun"
-                            >
-                              <CheckCircle2 size={14} /> Setujui
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1432,6 +1704,430 @@ export default function ManajemenPengguna({
           )}
         </div>
       )}
+
+      {/* TAB E: PUSAT BIG DATA SEKOLAH (ADMIN MASTER HUB) */}
+      {activeTab === 'big_data' && currentUserRole === 'admin' && (
+        <div className="space-y-6">
+          {/* Big Data Banner Card */}
+          <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 p-6 md:p-8 rounded-3xl text-white shadow-xl border border-indigo-800/50 flex flex-col md:flex-row md:items-center justify-between gap-6 relative overflow-hidden">
+            <div className="absolute top-0 right-0 -mt-8 -mr-8 w-60 h-60 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
+            
+            <div className="space-y-2 relative z-10">
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1 bg-indigo-500/20 text-indigo-300 rounded-full text-[10px] font-black uppercase tracking-wider border border-indigo-500/30 flex items-center gap-1.5">
+                  <Database size={12} className="text-emerald-400" />
+                  Administrator Master Central
+                </span>
+                <span className="px-2.5 py-1 bg-emerald-500/20 text-emerald-300 rounded-full text-[10px] font-bold border border-emerald-400/30">
+                  Big Data Terpusat
+                </span>
+              </div>
+              <h2 className="text-xl md:text-2xl font-black font-display tracking-tight text-white flex items-center gap-2">
+                <span>Pusat Big Data Administrasi Sekolah</span>
+              </h2>
+              <p className="text-xs md:text-sm text-indigo-100/80 max-w-2xl leading-relaxed">
+                Akun administrator utama bertindak menjadi Big Data untuk seluruh data kebutuhan administrasi guru dan siswa. Setiap guru yang disetujui memiliki basis data mandiri di cloud sesuai emailnya, dan admin dapat memantau seluruh ekosistem pembelajaran sekolah secara terpusat.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 shrink-0 relative z-10">
+              <button
+                onClick={handleExportBigDataJSON}
+                className="px-4 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-extrabold text-xs rounded-2xl shadow-lg flex items-center gap-2 cursor-pointer border border-emerald-400/30 transition-all"
+              >
+                <Download size={16} />
+                <span>Unduh Big Data JSON</span>
+              </button>
+              <button
+                onClick={handleExportCSV}
+                className="px-4 py-3 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-2xl flex items-center gap-2 cursor-pointer transition-colors border border-white/10"
+              >
+                <Download size={15} />
+                <span>Ekspor Rekap CSV</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Aggregated Quick Metrics */}
+          <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs">
+              <div className="flex items-center justify-between text-indigo-600 mb-2">
+                <span className="text-[11px] font-black uppercase text-slate-500">Guru Terdaftar</span>
+                <div className="w-8 h-8 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600">
+                  <Users size={16} />
+                </div>
+              </div>
+              <div className="text-2xl font-black text-slate-800">
+                {users.filter(u => u.role === 'guru').length}
+              </div>
+              <p className="text-[11px] text-emerald-600 font-bold mt-1 flex items-center gap-1">
+                <CheckCircle2 size={12} />
+                {users.filter(u => u.role === 'guru' && u.status === 'approved').length} Guru Aktif Disetujui
+              </p>
+            </div>
+
+            <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs">
+              <div className="flex items-center justify-between text-sky-600 mb-2">
+                <span className="text-[11px] font-black uppercase text-slate-500">Total Siswa Terdata</span>
+                <div className="w-8 h-8 rounded-xl bg-sky-50 flex items-center justify-center text-sky-600">
+                  <GraduationCap size={16} />
+                </div>
+              </div>
+              <div className="text-2xl font-black text-slate-800">
+                {users.filter(u => u.role === 'siswa').length}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Tersebar di {classList.length} rombel kelas
+              </p>
+            </div>
+
+            <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs">
+              <div className="flex items-center justify-between text-emerald-600 mb-2">
+                <span className="text-[11px] font-black uppercase text-slate-500">Partisi Database Guru</span>
+                <div className="w-8 h-8 rounded-xl bg-emerald-50 flex items-center justify-center text-emerald-600">
+                  <Database size={16} />
+                </div>
+              </div>
+              <div className="text-2xl font-black text-slate-800">
+                {users.filter(u => u.role === 'guru' && u.status === 'approved').length}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Partisi Firestore mandiri per email guru
+              </p>
+            </div>
+
+            <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs">
+              <div className="flex items-center justify-between text-amber-600 mb-2">
+                <span className="text-[11px] font-black uppercase text-slate-500">Rombongan Belajar</span>
+                <div className="w-8 h-8 rounded-xl bg-amber-50 flex items-center justify-center text-amber-600">
+                  <Layers size={16} />
+                </div>
+              </div>
+              <div className="text-2xl font-black text-slate-800">
+                {classList.length}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Kelas terdaftar di kurikulum sekolah
+              </p>
+            </div>
+          </div>
+
+          {/* SECTION 1: Matriks Distribusi Rombel & Kesiapan Administrasi */}
+          <div className="bg-white rounded-3xl border border-slate-200/80 shadow-sm overflow-hidden p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+              <div>
+                <h3 className="text-base font-black text-slate-800 flex items-center gap-2">
+                  <Layers size={18} className="text-indigo-600" />
+                  Matriks Distribusi Rombongan Belajar (Rombel)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Pemetaan siswa yang masuk ke kelas dan para guru yang mengajar di masing-masing rombel.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-slate-400">Filter:</span>
+                <select
+                  value={bigDataClassFilter}
+                  onChange={(e) => setBigDataClassFilter(e.target.value)}
+                  className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 outline-none"
+                >
+                  <option value="all">Semua Rombel ({classList.length})</option>
+                  {classList.map(c => (
+                    <option key={c} value={c}>Kelas {c}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {classList
+                .filter(c => bigDataClassFilter === 'all' || bigDataClassFilter === c)
+                .map(cls => {
+                  const classStudents = users.filter(u => u.role === 'siswa' && u.kelas === cls);
+                  const classTeachers = users.filter(u => u.role === 'guru' && u.teachingClasses?.includes(cls));
+                  const homeroom = users.find(u => u.role === 'guru' && u.homeroomClass === cls);
+                  const countL = classStudents.filter(s => s.gender === 'L').length;
+                  const countP = classStudents.filter(s => s.gender === 'P').length;
+
+                  return (
+                    <div key={cls} className="bg-slate-50/70 border border-slate-200/80 rounded-2xl p-4.5 space-y-3 hover:border-indigo-300 transition-all">
+                      <div className="flex items-center justify-between border-b border-slate-200/60 pb-2.5">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white font-black text-xs flex items-center justify-center shadow-xs">
+                            {cls}
+                          </div>
+                          <div>
+                            <h4 className="text-xs font-black text-slate-800">Kelas {cls}</h4>
+                            <span className="text-[10px] text-slate-500 font-medium">
+                              {classStudents.length} Siswa Terdaftar
+                            </span>
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 bg-sky-100 text-sky-800 rounded-full text-[10px] font-bold">
+                          {countL} L • {countP} P
+                        </span>
+                      </div>
+
+                      <div className="space-y-2 text-[11px]">
+                        <div className="flex items-start gap-1.5">
+                          <span className="text-slate-400 font-bold shrink-0">Wali Kelas:</span>
+                          <span className="font-bold text-slate-800">
+                            {homeroom ? homeroom.name : <span className="text-slate-400 font-normal italic">Belum ada</span>}
+                          </span>
+                        </div>
+
+                        <div className="space-y-1">
+                          <span className="text-slate-400 font-bold block">Guru Pengampu ({classTeachers.length}):</span>
+                          {classTeachers.length === 0 ? (
+                            <span className="text-slate-400 italic text-[10px]">Belum ada guru yang mengajar di kelas ini</span>
+                          ) : (
+                            <div className="flex flex-wrap gap-1">
+                              {classTeachers.map(t => (
+                                <span key={t.uid} className="px-2 py-0.5 bg-white border border-slate-200 text-indigo-700 rounded-md text-[10px] font-bold shadow-2xs" title={`Mapel: ${t.subject || '-'}`}>
+                                  {t.name.split(' ')[0]} ({t.subject || 'Mapel'})
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+
+          {/* SECTION 2: Direktori Partisi Database Mandiri Guru (Database Partition Hub) */}
+          <div className="bg-white rounded-3xl border border-slate-200/80 shadow-sm overflow-hidden p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+              <div>
+                <h3 className="text-base font-black text-slate-800 flex items-center gap-2">
+                  <Database size={18} className="text-indigo-600" />
+                  Direktori Partisi Database Guru (Database Sesuai Email)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Setiap akun guru yang disetujui memiliki partisi dokumen di Firestore (<code className="font-mono text-indigo-600 font-bold">guru_data/guru_[email]</code>).
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-50/90 border-b border-slate-100">
+                    <th className="px-5 py-3.5 text-[11px] font-black text-slate-500 uppercase tracking-wider">Guru Pengajar & NIP</th>
+                    <th className="px-5 py-3.5 text-[11px] font-black text-slate-500 uppercase tracking-wider">Mata Pelajaran & Mengajar</th>
+                    <th className="px-5 py-3.5 text-[11px] font-black text-slate-500 uppercase tracking-wider">Kunci Database (Partisi Email)</th>
+                    <th className="px-5 py-3.5 text-[11px] font-black text-slate-500 uppercase tracking-wider">Status Partisi</th>
+                    <th className="px-5 py-3.5 text-[11px] font-black text-slate-500 uppercase tracking-wider text-right">Aksi Admin</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-xs">
+                  {users.filter(u => u.role === 'guru').map(g => {
+                    const cleanEmail = (g.email || '').trim().toLowerCase();
+                    const dbKey = g.databaseKey || (cleanEmail ? `guru_${cleanEmail.replace(/[^a-z0-9_]/g, '_')}` : '-');
+                    const liveDb = guruDatabases.find(d => d.id === dbKey || d.syncKey === dbKey);
+
+                    return (
+                      <tr key={g.uid} className="hover:bg-slate-50/80 transition-colors">
+                        <td className="px-5 py-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-9 h-9 rounded-xl bg-indigo-100 text-indigo-700 font-black text-xs flex items-center justify-center shrink-0">
+                              {g.name.charAt(0)}
+                            </div>
+                            <div>
+                              <p className="font-black text-slate-800">{g.name}</p>
+                              <p className="text-[10px] text-slate-400 font-mono">NIP. {g.nip || '-'}</p>
+                              <p className="text-[10px] text-indigo-600">{g.email}</p>
+                            </div>
+                          </div>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded-md text-[10px] font-black border border-indigo-100 block w-fit mb-1">
+                            {g.subject || 'Mata Pelajaran Umum'}
+                          </span>
+                          <div className="flex flex-wrap gap-1">
+                            {(g.teachingClasses || []).map(cls => (
+                              <span key={cls} className="px-1.5 py-0.2 bg-slate-100 text-slate-700 rounded text-[9px] font-bold">
+                                {cls}
+                              </span>
+                            ))}
+                            {(!g.teachingClasses || g.teachingClasses.length === 0) && (
+                              <span className="text-[10px] text-slate-400 italic">Belum memilih kelas</span>
+                            )}
+                          </div>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          <div className="space-y-0.5">
+                            <code className="px-2 py-1 bg-slate-100 text-slate-700 rounded-lg text-[10px] font-mono font-bold block max-w-xs truncate border border-slate-200">
+                              {dbKey}
+                            </code>
+                            <span className="text-[9px] text-slate-400">
+                              Koleksi: /guru_data/{dbKey}
+                            </span>
+                          </div>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          {g.status === 'approved' ? (
+                            <div className="space-y-0.5">
+                              <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-md text-[10px] font-black inline-flex items-center gap-1">
+                                <CheckCircle2 size={11} /> Partisi Siap & Aktif
+                              </span>
+                              {liveDb && (
+                                <p className="text-[9px] text-slate-500 font-medium">
+                                  {Array.isArray(liveDb.students) ? liveDb.students.length : 0} Siswa • {Array.isArray(liveDb.grades) ? liveDb.grades.length : 0} Nilai
+                                </p>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-md text-[10px] font-black inline-flex items-center gap-1">
+                              <Clock size={11} /> Menunggu Verifikasi
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="px-5 py-4 text-right">
+                          <button
+                            onClick={() => setSelectedGuruDbDetail({ user: g, db: liveDb, dbKey })}
+                            className="px-3.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold rounded-xl text-[11px] transition-all cursor-pointer inline-flex items-center gap-1.5 border border-indigo-200"
+                          >
+                            <Eye size={13} />
+                            <span>Periksa Arsip Data</span>
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* INSPECTION MODAL FOR GURU DATABASE PARTITION */}
+      <AnimatePresence>
+        {selectedGuruDbDetail && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-3xl p-6 md:p-8 max-w-2xl w-full shadow-2xl border border-slate-100 space-y-5 max-h-[90vh] overflow-y-auto"
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-indigo-50 text-indigo-700 flex items-center justify-center border border-indigo-200">
+                    <Database size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-black text-slate-800">
+                      Inspeksi Partisi Database Guru
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Basis data terisolasi sesuai email guru di cloud
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSelectedGuruDbDetail(null)}
+                  className="w-8 h-8 rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 flex items-center justify-center text-xs font-bold"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Guru Identity Profile */}
+              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/80 space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-black text-slate-900 text-sm">{selectedGuruDbDetail.user?.name}</span>
+                  <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 font-bold rounded-lg border border-indigo-200 text-[10px]">
+                    {selectedGuruDbDetail.user?.subject || 'Mata Pelajaran Umum'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-600 pt-1">
+                  <div><strong>Email:</strong> {selectedGuruDbDetail.user?.email}</div>
+                  <div><strong>NIP:</strong> {selectedGuruDbDetail.user?.nip || '-'}</div>
+                  <div><strong>Instansi:</strong> {selectedGuruDbDetail.user?.institution || 'SMA Negeri 2 Tasikmalaya'}</div>
+                  <div><strong>Wali Kelas:</strong> {selectedGuruDbDetail.user?.homeroomClass || '-'}</div>
+                </div>
+                <div className="pt-2 border-t border-slate-200/60">
+                  <span className="text-[10px] text-slate-400 font-bold block mb-1">Kelas yang Diajar:</span>
+                  <div className="flex flex-wrap gap-1">
+                    {(selectedGuruDbDetail.user?.teachingClasses || []).map((cls: string) => (
+                      <span key={cls} className="px-2 py-0.5 bg-white border border-slate-200 text-slate-700 font-bold rounded text-[10px]">
+                        {cls}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Database Partition Info */}
+              <div className="p-4 bg-indigo-50/70 border border-indigo-100 rounded-2xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-black text-indigo-950 flex items-center gap-1.5">
+                    <Database size={14} className="text-indigo-600" />
+                    Koleksi Firestore Partisi
+                  </span>
+                  <code className="text-[11px] font-mono font-bold bg-white px-2 py-0.5 rounded border border-indigo-200 text-indigo-800">
+                    guru_data/{selectedGuruDbDetail.dbKey}
+                  </code>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2">
+                  <div className="bg-white p-3 rounded-xl border border-indigo-100 text-center">
+                    <span className="text-[10px] font-bold text-slate-400 block">Siswa Tersimpan</span>
+                    <span className="text-lg font-black text-slate-800">
+                      {Array.isArray(selectedGuruDbDetail.db?.students) ? selectedGuruDbDetail.db.students.length : 0}
+                    </span>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-xl border border-indigo-100 text-center">
+                    <span className="text-[10px] font-bold text-slate-400 block">Rekap Nilai</span>
+                    <span className="text-lg font-black text-slate-800">
+                      {Array.isArray(selectedGuruDbDetail.db?.grades) ? selectedGuruDbDetail.db.grades.length : 0}
+                    </span>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-xl border border-indigo-100 text-center">
+                    <span className="text-[10px] font-bold text-slate-400 block">Presensi</span>
+                    <span className="text-lg font-black text-slate-800">
+                      {Array.isArray(selectedGuruDbDetail.db?.attendanceList) ? selectedGuruDbDetail.db.attendanceList.length : 0}
+                    </span>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-xl border border-indigo-100 text-center">
+                    <span className="text-[10px] font-bold text-slate-400 block">Jurnal / Modul</span>
+                    <span className="text-lg font-black text-slate-800">
+                      {(selectedGuruDbDetail.db?.journals?.length || 0) + (selectedGuruDbDetail.db?.materials?.length || 0)}
+                    </span>
+                  </div>
+                </div>
+
+                {selectedGuruDbDetail.db?.lastUpdated && (
+                  <p className="text-[10px] text-slate-500 text-right">
+                    Terakhir disinkronisasi: {new Date(selectedGuruDbDetail.db.lastUpdated).toLocaleString('id-ID')}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedGuruDbDetail(null)}
+                  className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition-all cursor-pointer"
+                >
+                  Tutup Inspeksi
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* ---------------------------------------------------- */}
       {/* MODAL 1: RESET PASSWORD (SUPER PRACTICAL)             */}

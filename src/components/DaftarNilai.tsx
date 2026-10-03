@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
   Users, 
@@ -26,14 +26,26 @@ import {
   Plus,
   Filter,
   Smartphone,
-  LayoutGrid
+  LayoutGrid,
+  Clipboard,
+  RotateCcw,
+  Database,
+  Info,
+  CheckSquare,
+  ChevronDown,
+  SlidersHorizontal
 } from "lucide-react";
 import { Student, Assignment, StudentGrade, Submission } from "../types";
 import { CLASSES } from "../data/presets";
+import { safeStorage } from "../lib/safeStorage";
 import { utils, writeFile } from "xlsx";
 import * as jspdfModule from "jspdf";
 import autoTable from "jspdf-autotable";
 import ExportPreviewModal from "./ExportPreviewModal";
+import MenuDataRestoreModal from "./MenuDataRestoreModal";
+import ExportPendingTasksModal from "./ExportPendingTasksModal";
+import { getStoredTteConfig, renderTteImageHtml, embedTteInJsPdf } from "../lib/tteUtils";
+import { renderKopHeaderHtml } from "../lib/kopUtils";
 
 interface DaftarNilaiProps {
   students: Student[];
@@ -41,6 +53,7 @@ interface DaftarNilaiProps {
   submissions?: Submission[];
   grades: StudentGrade[];
   onUpdateGradeCell: (studentId: string, assignmentId: string | "exam" | "midterm" | "character", value: number) => void;
+  onRestoreGrades?: (data: { grades?: StudentGrade[]; assignments?: Assignment[]; submissions?: Submission[] }, mode: "merge" | "replace") => void;
   onUpdateSubmission?: (
     submissionId: string, 
     updatedAnswer: string, 
@@ -49,6 +62,8 @@ interface DaftarNilaiProps {
     studentId?: string, 
     assignmentId?: string
   ) => void;
+  onNavigateToAssignments?: (className?: string) => void;
+  onAddAssignment?: (newAssignment: Omit<Assignment, "id">, applyToAll?: boolean) => void;
   classList?: string[];
   teacherName?: string;
   nip?: string;
@@ -62,6 +77,145 @@ interface DaftarNilaiProps {
   academicYear?: string;
 }
 
+export interface CalculatedStudentGradeResult {
+  hasInputtedScores: boolean;
+  activeWeightSum: number;
+  assignmentAvg: number | null;
+  enteredAssignmentsCount: number;
+  midtermScore: number | null;
+  examScore: number | null;
+  characterScore: number | null;
+  finalScore: number | null;
+  isPass: boolean;
+  componentsSummary: string;
+}
+
+export const calculateStudentScore = (
+  student: Student,
+  gradeObj: StudentGrade | undefined,
+  classAssignments: Assignment[],
+  weights: { assignment: number; midterm: number; exam: number; character: number },
+  onlyInputted: boolean = true,
+  treatZeroAsEmpty: boolean = true
+): CalculatedStudentGradeResult => {
+  // 1. Assignment component: Jika tugas belum masuk isikan dengan nilai 0
+  const assignmentScores: number[] = [];
+  let enteredAssignmentCount = 0;
+  
+  if (classAssignments.length > 0) {
+    classAssignments.forEach(a => {
+      const raw = gradeObj?.assignmentScores?.[a.id];
+      if (raw !== undefined && raw !== null && !isNaN(raw)) {
+        assignmentScores.push(raw);
+        if (raw > 0) enteredAssignmentCount++;
+      } else {
+        // Aturan: Jika tugas belum masuk isikan dengan nilai 0
+        assignmentScores.push(0);
+      }
+    });
+  }
+
+  const hasAssignmentScore = assignmentScores.length > 0;
+  const assignmentAvg = hasAssignmentScore
+    ? Math.round(assignmentScores.reduce((sum, v) => sum + v, 0) / assignmentScores.length)
+    : (onlyInputted ? null : 0);
+
+  // 2. Midterm (PTS / STS)
+  const rawMidterm = gradeObj?.midtermScore;
+  const isMidtermValid = rawMidterm !== undefined && rawMidterm !== null && !isNaN(rawMidterm) && 
+    (onlyInputted && treatZeroAsEmpty ? rawMidterm > 0 : true);
+  const midtermScore = isMidtermValid ? rawMidterm : (onlyInputted ? null : 0);
+
+  // 3. Exam (PAS / SAS)
+  const rawExam = gradeObj?.examScore;
+  const isExamValid = rawExam !== undefined && rawExam !== null && !isNaN(rawExam) && 
+    (onlyInputted && treatZeroAsEmpty ? rawExam > 0 : true);
+  const examScore = isExamValid ? rawExam : (onlyInputted ? null : 0);
+
+  // 4. Character (Sikap)
+  const rawCharacter = gradeObj?.characterScore;
+  const isCharacterValid = rawCharacter !== undefined && rawCharacter !== null && !isNaN(rawCharacter) && 
+    (onlyInputted && treatZeroAsEmpty ? rawCharacter > 0 : true);
+  const characterScore = isCharacterValid ? rawCharacter : (onlyInputted ? null : 0);
+
+  if (onlyInputted) {
+    let weightedSum = 0;
+    let activeWeight = 0;
+    const activeComponents: string[] = [];
+
+    if (assignmentAvg !== null) {
+      weightedSum += assignmentAvg * weights.assignment;
+      activeWeight += weights.assignment;
+      activeComponents.push(`Tugas (${assignmentScores.length})`);
+    }
+    if (midtermScore !== null) {
+      weightedSum += midtermScore * weights.midterm;
+      activeWeight += weights.midterm;
+      activeComponents.push("PTS");
+    }
+    if (examScore !== null) {
+      weightedSum += examScore * weights.exam;
+      activeWeight += weights.exam;
+      activeComponents.push("PAS");
+    }
+    if (characterScore !== null) {
+      weightedSum += characterScore * weights.character;
+      activeWeight += weights.character;
+      activeComponents.push("Sikap");
+    }
+
+    if (activeWeight === 0) {
+      return {
+        hasInputtedScores: false,
+        activeWeightSum: 0,
+        assignmentAvg: null,
+        enteredAssignmentsCount: 0,
+        midtermScore: null,
+        examScore: null,
+        characterScore: null,
+        finalScore: null,
+        isPass: false,
+        componentsSummary: "Belum ada nilai terinput",
+      };
+    }
+
+    const finalScore = Math.round(weightedSum / activeWeight);
+    return {
+      hasInputtedScores: true,
+      activeWeightSum: activeWeight,
+      assignmentAvg,
+      enteredAssignmentsCount: enteredAssignmentCount,
+      midtermScore,
+      examScore,
+      characterScore,
+      finalScore,
+      isPass: finalScore >= 75,
+      componentsSummary: activeComponents.join(" + "),
+    };
+  } else {
+    // Standard fixed full 100% calculation
+    const totalW = weights.assignment + weights.midterm + weights.exam + weights.character || 100;
+    const weightedSum = 
+      ((assignmentAvg || 0) * weights.assignment) +
+      ((midtermScore || 0) * weights.midterm) +
+      ((examScore || 0) * weights.exam) +
+      ((characterScore || 0) * weights.character);
+    const finalScoreRounded = Math.round(weightedSum / totalW);
+    return {
+      hasInputtedScores: true,
+      activeWeightSum: totalW,
+      assignmentAvg,
+      enteredAssignmentsCount: assignmentScores.length,
+      midtermScore,
+      examScore,
+      characterScore,
+      finalScore: finalScoreRounded,
+      isPass: finalScoreRounded >= 75,
+      componentsSummary: "Semua Komponen (Termasuk 0)",
+    };
+  }
+};
+
 export default function DaftarNilai({
   students,
   assignments,
@@ -69,6 +223,8 @@ export default function DaftarNilai({
   grades,
   onUpdateGradeCell,
   onUpdateSubmission,
+  onNavigateToAssignments,
+  onAddAssignment,
   classList,
   teacherName = "YUDI GINANJAR, S.Pd",
   nip = "199605242024211008",
@@ -79,13 +235,100 @@ export default function DaftarNilai({
   headmasterRank = "Pembina Utama Muda, IV/c",
   documentCity = "Tasikmalaya",
   schoolNpsn = "20224510",
-  academicYear = "2025/2026 (Genap)"
+  academicYear = "2025/2026 (Genap)",
+  onRestoreGrades
 }: DaftarNilaiProps) {
   const availableClasses = classList && classList.length > 0 ? classList : CLASSES;
-  const [selectedClass, setSelectedClass] = useState<string>(availableClasses[0] || "X-MIPA-1");
+  const [selectedClass, setSelectedClass] = useState<string>(() => {
+    const saved = safeStorage.getItem("guru_active_class");
+    if (saved && availableClasses.includes(saved)) return saved;
+    return availableClasses[0] || "X-MIPA-1";
+  });
+
+  const handleSelectClass = (cls: string) => {
+    setSelectedClass(cls);
+    safeStorage.setItem("guru_active_class", cls);
+  };
+
   const [searchQuery, setSearchQuery] = useState("");
   const [cardSearchQuery, setCardSearchQuery] = useState("");
   const [activeTabMode, setActiveTabMode] = useState<"matrix" | "cards" | "history">("matrix");
+  const [syncNotice, setSyncNotice] = useState<string>("");
+  const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
+
+  // Export JSON Backup
+  const handleExportGradesJson = () => {
+    const backupPayload = {
+      app: "EduAsisten",
+      version: "2.5",
+      category: "grades",
+      exportedAt: new Date().toISOString(),
+      gradesCount: grades.length,
+      assignmentsCount: assignments.length,
+      submissionsCount: submissions.length,
+      grades: grades,
+      assignments: assignments,
+      submissions: submissions
+    };
+    const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Backup_Daftar_Nilai_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Restore Grades Data Handler
+  const handleRestoreGradesData = (importedData: any, mode: "merge" | "replace") => {
+    let importedGrades: StudentGrade[] = [];
+    let importedAssignments: Assignment[] = [];
+    let importedSubmissions: Submission[] = [];
+
+    if (Array.isArray(importedData)) {
+      importedGrades = importedData;
+    } else if (importedData && typeof importedData === "object") {
+      importedGrades = importedData.grades || importedData.studentGrades || [];
+      importedAssignments = importedData.assignments || [];
+      importedSubmissions = importedData.submissions || [];
+    }
+
+    if (importedGrades.length === 0 && importedAssignments.length === 0 && importedSubmissions.length === 0) {
+      return { success: false, message: "Tidak ditemukan data nilai atau tugas yang valid dalam berkas." };
+    }
+
+    if (onRestoreGrades) {
+      onRestoreGrades({
+        grades: importedGrades,
+        assignments: importedAssignments,
+        submissions: importedSubmissions
+      }, mode);
+    } else {
+      // Fallback cell-by-cell restore
+      importedGrades.forEach(g => {
+        if (g.studentId) {
+          const scores = g.assignmentScores || (g as any).assignments;
+          if (scores && typeof scores === "object") {
+            Object.entries(scores).forEach(([assignId, score]) => {
+              if (typeof score === "number") onUpdateGradeCell(g.studentId, assignId, score);
+            });
+          }
+          if (typeof g.examScore === "number") onUpdateGradeCell(g.studentId, "exam", g.examScore);
+          if (typeof g.midtermScore === "number") onUpdateGradeCell(g.studentId, "midterm", g.midtermScore);
+          if (typeof g.characterScore === "number") onUpdateGradeCell(g.studentId, "character", g.characterScore);
+        }
+      });
+    }
+
+    const totalCount = importedGrades.length + importedAssignments.length;
+    return {
+      success: true,
+      count: totalCount,
+      message: `Berhasil memulihkan data penilaian (${totalCount} item diproses dalam mode ${mode === "merge" ? "Gabung & Lengkapi" : "Ganti Total"})!`
+    };
+  };
 
   const activeSelectedClass = availableClasses.includes(selectedClass) 
     ? selectedClass 
@@ -105,10 +348,18 @@ export default function DaftarNilai({
   const [characterWeight, setCharacterWeight] = useState(10);
   const totalWeight = assignmentWeight + midtermWeight + examWeight + characterWeight;
 
+  // Calculation mode: only calculate inputted values (exclude empty/unheld tests from denominator)
+  const [onlyCalculateInputted, setOnlyCalculateInputted] = useState<boolean>(true);
+  const [treatZeroAsEmpty, setTreatZeroAsEmpty] = useState<boolean>(true);
+
   // Export State
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [isPendingExportModalOpen, setIsPendingExportModalOpen] = useState(false);
   const [previewData, setPreviewData] = useState<any[]>([]);
-  const [exportMode, setExportMode] = useState<string>("all");
+  // Multi-select state: can contain "all" or multiple specific IDs
+  const [selectedExportColumns, setSelectedExportColumns] = useState<string[]>(["all"]);
+  const [isExportDropdownOpen, setIsExportDropdownOpen] = useState(false);
+  const exportDropdownRef = useRef<HTMLDivElement>(null);
 
   // Exam History Modal State for individual student
   const [selectedStudentForHistory, setSelectedStudentForHistory] = useState<Student | null>(null);
@@ -136,48 +387,146 @@ export default function DaftarNilai({
     );
   }, [students, activeSelectedClass, searchQuery]);
 
-  // Calculate stats for current class grades
-  const stats = useMemo(() => {
-    const classGrades = grades.filter(g => g.className === activeSelectedClass);
-    if (classGrades.length === 0) {
-      return { average: 0, highest: 0, lowest: 0, passingCount: 0, passRate: 0 };
+  // Close export dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (exportDropdownRef.current && !exportDropdownRef.current.contains(event.target as Node)) {
+        setIsExportDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, []);
+
+  // Exportable options list for multi-selection
+  const exportOptions = useMemo(() => {
+    const list: { id: string; label: string; category: "assignment" | "exam" | "result" }[] = [];
+    classAssignments.forEach(a => {
+      list.push({
+        id: `assignment_${a.id}`,
+        label: `Tugas: ${a.title}`,
+        category: "assignment"
+      });
+    });
+    list.push({ id: "pts", label: "Nilai PTS", category: "exam" });
+    list.push({ id: "pas", label: "Nilai Ujian (PAS)", category: "exam" });
+    list.push({ id: "sikap", label: "Nilai Sikap", category: "exam" });
+    list.push({ id: "final_score", label: "Nilai Akhir", category: "result" });
+    list.push({ id: "status", label: "Status Kelulusan", category: "result" });
+    return list;
+  }, [classAssignments]);
+
+  const allOptionIds = useMemo(() => exportOptions.map(o => o.id), [exportOptions]);
+  const isAllExportSelected = selectedExportColumns.includes("all") || (
+    allOptionIds.length > 0 && allOptionIds.every(id => selectedExportColumns.includes(id))
+  );
+
+  const toggleExportColumn = (id: string) => {
+    if (id === "all") {
+      if (isAllExportSelected) {
+        setSelectedExportColumns([]);
+      } else {
+        setSelectedExportColumns(["all"]);
+      }
+      return;
     }
 
-    let totalScoreSum = 0;
-    let highest = 0;
-    let lowest = 100;
-    let passingCount = 0;
+    if (isAllExportSelected) {
+      const newSelected = allOptionIds.filter(item => item !== id);
+      setSelectedExportColumns(newSelected);
+    } else {
+      let newSelected: string[];
+      if (selectedExportColumns.includes(id)) {
+        newSelected = selectedExportColumns.filter(item => item !== id && item !== "all");
+      } else {
+        newSelected = [...selectedExportColumns.filter(item => item !== "all"), id];
+        if (allOptionIds.length > 0 && allOptionIds.every(optId => newSelected.includes(optId))) {
+          newSelected = ["all"];
+        }
+      }
+      setSelectedExportColumns(newSelected);
+    }
+  };
 
-    classGrades.forEach(g => {
-      const scores = Object.values(g.assignmentScores);
-      const assignmentAvg = scores.length > 0 
-        ? scores.reduce((sum, val) => sum + val, 0) / scores.length 
-        : 0;
-      
-      const finalScore = Math.round(
-        (assignmentAvg * (assignmentWeight / 100)) + 
-        ((g.midtermScore || 0) * (midtermWeight / 100)) +
-        (g.examScore * (examWeight / 100)) +
-        ((g.characterScore || 0) * (characterWeight / 100))
+  const selectAllAssignmentsOnly = () => {
+    const assignmentIds = classAssignments.map(a => `assignment_${a.id}`);
+    setSelectedExportColumns(assignmentIds);
+  };
+
+  const selectAllExamsOnly = () => {
+    setSelectedExportColumns(["pts", "pas", "sikap"]);
+  };
+
+  const selectAllExport = () => {
+    setSelectedExportColumns(["all"]);
+  };
+
+  const clearAllExport = () => {
+    setSelectedExportColumns([]);
+  };
+
+  const getDropdownButtonLabel = () => {
+    if (isAllExportSelected) {
+      return "Semua Nilai (Lengkap)";
+    }
+    if (selectedExportColumns.length === 0) {
+      return "Pilih Komponen Nilai...";
+    }
+    if (selectedExportColumns.length === 1) {
+      const singleOpt = exportOptions.find(o => o.id === selectedExportColumns[0]);
+      return singleOpt?.label || "1 Komponen Dipilih";
+    }
+    return `${selectedExportColumns.length} Komponen Dipilih`;
+  };
+
+  // Calculate stats for current class grades based on inputted values only or full formula
+  const stats = useMemo(() => {
+    // Evaluate calculated grade for each student in current class
+    const studentGradesList = classStudents.map(student => {
+      const gradeObj = grades.find(g => g.studentId === student.id);
+      return calculateStudentScore(
+        student,
+        gradeObj,
+        classAssignments,
+        { assignment: assignmentWeight, midterm: midtermWeight, exam: examWeight, character: characterWeight },
+        onlyCalculateInputted,
+        treatZeroAsEmpty
       );
-
-      totalScoreSum += finalScore;
-      if (finalScore > highest) highest = finalScore;
-      if (finalScore < lowest) lowest = finalScore;
-      if (finalScore >= 75) passingCount++;
     });
 
-    const average = Math.round(totalScoreSum / classGrades.length);
-    const passRate = Math.round((passingCount / classGrades.length) * 100);
+    const scoredStudents = studentGradesList.filter(s => s.hasInputtedScores && s.finalScore !== null);
+
+    if (scoredStudents.length === 0) {
+      return { 
+        average: 0, 
+        highest: 0, 
+        lowest: 0, 
+        passingCount: 0, 
+        passRate: 0,
+        scoredStudentsCount: 0,
+        totalStudentsCount: classStudents.length
+      };
+    }
+
+    const totalScoreSum = scoredStudents.reduce((sum, s) => sum + (s.finalScore || 0), 0);
+    const average = Math.round(totalScoreSum / scoredStudents.length);
+    const passingCount = scoredStudents.filter(s => s.isPass).length;
+    const passRate = Math.round((passingCount / scoredStudents.length) * 100);
+    const highest = Math.max(...scoredStudents.map(s => s.finalScore || 0));
+    const lowest = Math.min(...scoredStudents.map(s => s.finalScore || 0));
 
     return { 
       average, 
       highest, 
-      lowest: lowest === 100 && classGrades.length === 0 ? 0 : lowest, 
+      lowest, 
       passingCount, 
-      passRate 
+      passRate,
+      scoredStudentsCount: scoredStudents.length,
+      totalStudentsCount: classStudents.length
     };
-  }, [grades, activeSelectedClass, assignmentWeight, midtermWeight, examWeight, characterWeight]);
+  }, [classStudents, grades, classAssignments, assignmentWeight, midtermWeight, examWeight, characterWeight, onlyCalculateInputted, treatZeroAsEmpty]);
 
   // Helper to start editing submission answers
   const startEditSubmission = (sub: Submission | null, defaultStudentId: string, defaultAssignmentId: string, defaultScore: number) => {
@@ -212,21 +561,66 @@ export default function DaftarNilai({
   };
 
   // Handle cell edit trigger
-  const triggerEdit = (studentId: string, type: string, currentValue: number) => {
+  const triggerEdit = (studentId: string, type: string, currentValue: number | undefined | null) => {
     setEditingCell({ studentId, type });
-    setEditValue(currentValue.toString());
+    setEditValue(currentValue !== undefined && currentValue !== null && !isNaN(currentValue) ? currentValue.toString() : "");
   };
 
   // Handle saving cell edit
   const saveCellEdit = () => {
     if (!editingCell) return;
-    const valueNum = Math.min(100, Math.max(0, parseFloat(editValue) || 0));
+    const valueNum = editValue.trim() === "" ? 0 : Math.min(100, Math.max(0, parseFloat(editValue) || 0));
     onUpdateGradeCell(editingCell.studentId, editingCell.type as any, valueNum);
+    
+    // Feedback: Inform user of sync with Kelola Tugas
+    const targetAssignment = classAssignments.find(a => a.id === editingCell.type);
+    const targetStudent = classStudents.find(s => s.id === editingCell.studentId);
+    let taskName = targetAssignment?.title;
+    if (editingCell.type === "midterm") taskName = "Sumatif Tengah Semester (STS / PTS)";
+    if (editingCell.type === "exam") taskName = "Sumatif Akhir Semester (SAS / PAS)";
+    if (editingCell.type === "character") taskName = "Penilaian Sikap";
+
+    if (taskName) {
+      setSyncNotice(`Nilai ${targetStudent?.name || "siswa"} (${valueNum}) tersimpan & otomatis tersinkronisasi ke Menu Kelola Tugas ("${taskName}")!`);
+      setTimeout(() => setSyncNotice(""), 4500);
+    }
+    
     setEditingCell(null);
+  };
+
+  // Mengisikan nilai 0 secara massal untuk seluruh tugas yang belum masuk di kelas aktif
+  const handleFillZeroForMissingAssignments = () => {
+    if (classAssignments.length === 0) {
+      setSyncNotice("Belum ada tugas yang dibuat untuk kelas ini.");
+      setTimeout(() => setSyncNotice(""), 3000);
+      return;
+    }
+
+    let count = 0;
+    classStudents.forEach(student => {
+      const gradeObj = grades.find(g => g.studentId === student.id);
+      classAssignments.forEach(a => {
+        const raw = gradeObj?.assignmentScores?.[a.id];
+        if (raw === undefined || raw === null || isNaN(raw)) {
+          onUpdateGradeCell(student.id, a.id as any, 0);
+          count++;
+        }
+      });
+    });
+
+    if (count > 0) {
+      setSyncNotice(`Berhasil mengisikan nilai 0 untuk ${count} tugas siswa yang belum masuk di kelas ${activeSelectedClass}!`);
+    } else {
+      setSyncNotice(`Seluruh tugas siswa di kelas ${activeSelectedClass} sudah terisi nilai.`);
+    }
+    setTimeout(() => setSyncNotice(""), 4500);
   };
 
   // Export Logic
   const getExportData = () => {
+    const isAll = isAllExportSelected;
+    const activeCols = isAll ? allOptionIds : selectedExportColumns;
+
     return classStudents.map(student => {
       let gradeObj = grades.find(g => g.studentId === student.id);
       if (!gradeObj) {
@@ -241,71 +635,73 @@ export default function DaftarNilai({
         };
       }
 
+      const scoreResult = calculateStudentScore(
+        student,
+        gradeObj,
+        classAssignments,
+        { assignment: assignmentWeight, midterm: midtermWeight, exam: examWeight, character: characterWeight },
+        onlyCalculateInputted,
+        treatZeroAsEmpty
+      );
+
       const record: any = {
         NIS: student.nis,
         Nama: student.name,
       };
 
-      if (exportMode === "all") {
-        const assignmentScoresList = classAssignments.map(a => gradeObj!.assignmentScores[a.id] || 0);
-        const assignmentAvg = assignmentScoresList.length > 0 
-          ? assignmentScoresList.reduce((sum, v) => sum + v, 0) / assignmentScoresList.length 
-          : 0;
-        
-        const finalGrade = Math.round(
-          (assignmentAvg * (assignmentWeight / 100)) + 
-          ((gradeObj.midtermScore || 0) * (midtermWeight / 100)) +
-          (gradeObj.examScore * (examWeight / 100)) +
-          ((gradeObj.characterScore || 0) * (characterWeight / 100))
-        );
-
-        classAssignments.forEach(a => {
-          record[a.title] = gradeObj!.assignmentScores[a.id] || 0;
-        });
-
-        record["Nilai PTS"] = gradeObj.midtermScore || 0;
-        record["Nilai Ujian (PAS)"] = gradeObj.examScore;
-        record["Nilai Sikap"] = gradeObj.characterScore || 0;
-        record["Nilai Akhir"] = finalGrade;
-        record["Status"] = finalGrade >= 75 ? "Lulus" : "Remedial";
-      } else if (exportMode.startsWith("assignment_")) {
-        const assignmentId = exportMode.replace("assignment_", "");
-        const assignment = classAssignments.find(a => a.id === assignmentId);
-        if (assignment) {
-          record[assignment.title] = gradeObj.assignmentScores[assignment.id] || 0;
+      // Assignments
+      classAssignments.forEach(a => {
+        const aKey = `assignment_${a.id}`;
+        if (isAll || activeCols.includes(aKey)) {
+          const raw = gradeObj!.assignmentScores[a.id];
+          // Aturan: Jika tugas belum masuk isikan dengan nilai 0
+          record[a.title] = raw !== undefined && raw !== null ? raw : 0;
         }
-      } else if (exportMode === "pts") {
-        record["Nilai PTS"] = gradeObj.midtermScore || 0;
-      } else if (exportMode === "pas") {
-        record["Nilai Ujian (PAS)"] = gradeObj.examScore;
-      } else if (exportMode === "sikap") {
-        record["Nilai Sikap"] = gradeObj.characterScore || 0;
+      });
+
+      // Exams & Attitude
+      if (isAll || activeCols.includes("pts")) {
+        record["Nilai PTS"] = gradeObj.midtermScore !== undefined && gradeObj.midtermScore > 0 ? gradeObj.midtermScore : (treatZeroAsEmpty ? "-" : 0);
       }
-      
+      if (isAll || activeCols.includes("pas")) {
+        record["Nilai Ujian (PAS)"] = gradeObj.examScore !== undefined && gradeObj.examScore > 0 ? gradeObj.examScore : (treatZeroAsEmpty ? "-" : 0);
+      }
+      if (isAll || activeCols.includes("sikap")) {
+        record["Nilai Sikap"] = gradeObj.characterScore !== undefined && gradeObj.characterScore > 0 ? gradeObj.characterScore : (treatZeroAsEmpty ? "-" : 0);
+      }
+      if (isAll || activeCols.includes("final_score")) {
+        record["Nilai Akhir"] = scoreResult.finalScore !== null ? scoreResult.finalScore : "-";
+      }
+      if (isAll || activeCols.includes("status")) {
+        record["Status"] = scoreResult.finalScore !== null ? (scoreResult.isPass ? "Lulus" : "Remedial") : "Belum Dinilai";
+      }
+
       return record;
     });
   };
 
   const exportColumns = useMemo(() => {
     const cols = ["NIS", "Nama"];
-    if (exportMode === "all") {
-      classAssignments.forEach(a => cols.push(a.title));
-      cols.push("Nilai PTS", "Nilai Ujian (PAS)", "Nilai Sikap", "Nilai Akhir", "Status");
-    } else if (exportMode.startsWith("assignment_")) {
-      const assignmentId = exportMode.replace("assignment_", "");
-      const assignment = classAssignments.find(a => a.id === assignmentId);
-      if (assignment) cols.push(assignment.title);
-    } else if (exportMode === "pts") {
-      cols.push("Nilai PTS");
-    } else if (exportMode === "pas") {
-      cols.push("Nilai Ujian (PAS)");
-    } else if (exportMode === "sikap") {
-      cols.push("Nilai Sikap");
-    }
-    return cols;
-  }, [exportMode, classAssignments]);
+    const isAll = isAllExportSelected;
+    const activeCols = isAll ? allOptionIds : selectedExportColumns;
 
-  const handleExport = (type: "xlsx" | "pdf" | "print") => {
+    classAssignments.forEach(a => {
+      const aKey = `assignment_${a.id}`;
+      if (isAll || activeCols.includes(aKey)) {
+        cols.push(a.title);
+      }
+    });
+
+    if (isAll || activeCols.includes("pts")) cols.push("Nilai PTS");
+    if (isAll || activeCols.includes("pas")) cols.push("Nilai Ujian (PAS)");
+    if (isAll || activeCols.includes("sikap")) cols.push("Nilai Sikap");
+    if (isAll || activeCols.includes("final_score")) cols.push("Nilai Akhir");
+    if (isAll || activeCols.includes("status")) cols.push("Status");
+
+    return cols;
+  }, [isAllExportSelected, allOptionIds, selectedExportColumns, classAssignments]);
+
+  const handleExport = (type: "xlsx" | "pdf" | "print", includeSignatures: boolean = true) => {
     const data = getExportData();
     if (type === "xlsx") {
       const worksheet = utils.json_to_sheet(data);
@@ -353,28 +749,38 @@ export default function DaftarNilai({
           });
         }
 
-        let lastY = (doc as any).lastAutoTable ? (doc as any).lastAutoTable.finalY + 12 : 140;
-        if (lastY > 165) {
-          doc.addPage();
-          lastY = 20;
+        if (includeSignatures) {
+          let lastY = (doc as any).lastAutoTable ? (doc as any).lastAutoTable.finalY + 12 : 140;
+          if (lastY > 165) {
+            doc.addPage();
+            lastY = 20;
+          }
+
+          const tteConfig = getStoredTteConfig();
+
+          doc.setFontSize(9);
+          doc.setFont("helvetica", "normal");
+          
+          doc.text("Mengetahui,", 30, lastY);
+          doc.text("Kepala Sekolah", 30, lastY + 5);
+          if (tteConfig.usePrincipalTte && tteConfig.principalTteImage) {
+            embedTteInJsPdf(doc, tteConfig.principalTteImage, 30, lastY + 7, 30, 14);
+          }
+          doc.setFont("helvetica", "bold");
+          doc.text(headmasterName || "( ................................................. )", 30, lastY + 24);
+          doc.setFont("helvetica", "normal");
+          doc.text(`NIP. ${headmasterNip || "-"}`, 30, lastY + 29);
+
+          doc.text(`${documentCity}, ${dateStr}`, 200, lastY);
+          doc.text("Guru Mata Pelajaran", 200, lastY + 5);
+          if (tteConfig.useTeacherTte && tteConfig.teacherTteImage) {
+            embedTteInJsPdf(doc, tteConfig.teacherTteImage, 200, lastY + 7, 30, 14);
+          }
+          doc.setFont("helvetica", "bold");
+          doc.text(teacherName || "( ................................................. )", 200, lastY + 24);
+          doc.setFont("helvetica", "normal");
+          doc.text(`NIP. ${nip || "-"}`, 200, lastY + 29);
         }
-
-        doc.setFontSize(9);
-        doc.setFont("helvetica", "normal");
-        
-        doc.text("Mengetahui,", 30, lastY);
-        doc.text("Kepala Sekolah", 30, lastY + 5);
-        doc.setFont("helvetica", "bold");
-        doc.text(headmasterName || "( ................................................. )", 30, lastY + 22);
-        doc.setFont("helvetica", "normal");
-        doc.text(`NIP. ${headmasterNip || "-"}`, 30, lastY + 27);
-
-        doc.text(`${documentCity}, ${dateStr}`, 200, lastY);
-        doc.text("Guru Mata Pelajaran", 200, lastY + 5);
-        doc.setFont("helvetica", "bold");
-        doc.text(teacherName || "( ................................................. )", 200, lastY + 22);
-        doc.setFont("helvetica", "normal");
-        doc.text(`NIP. ${nip || "-"}`, 200, lastY + 27);
 
         doc.save(`Daftar_Nilai_${activeSelectedClass}.pdf`);
       } catch (err) {
@@ -389,6 +795,10 @@ export default function DaftarNilai({
       }
 
       const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+      const tteConfig = getStoredTteConfig();
+      const headmasterTteSnippet = tteConfig.usePrincipalTte ? renderTteImageHtml(tteConfig.principalTteImage, "TTE Kepala Sekolah", 48, 120) : "";
+      const teacherTteSnippet = tteConfig.useTeacherTte ? renderTteImageHtml(tteConfig.teacherTteImage, "TTE Guru", 48, 120) : "";
+
       const html = `
         <!DOCTYPE html>
         <html>
@@ -412,11 +822,16 @@ export default function DaftarNilai({
           </style>
         </head>
         <body>
-          <div class="header">
-            <h2>${institution.replace(/\n/g, '<br>')}</h2>
-            <h3>LEMBAR DAFTAR NILAI DAN ASESMEN PESERTA DIDIK</h3>
-            <p>Mata Pelajaran: <strong>${subject}</strong> • NPSN: ${schoolNpsn || '-'} • Tahun Ajaran: ${academicYear}</p>
-          </div>
+          ${renderKopHeaderHtml({
+            documentTitle: "LEMBAR DAFTAR NILAI DAN ASESMEN PESERTA DIDIK",
+            subtitle: `Mata Pelajaran: <strong>${subject}</strong> • NPSN: ${schoolNpsn || '-'} • Tahun Ajaran: ${academicYear}`,
+            customConfig: {
+              institution,
+              schoolNpsn,
+              academicYear,
+              subject
+            }
+          })}
 
           <div class="meta-box">
             <div><strong>Kelas:</strong> ${activeSelectedClass}</div>
@@ -448,10 +863,12 @@ export default function DaftarNilai({
             </tbody>
           </table>
 
+          ${includeSignatures ? `
           <div class="signatures">
             <div>
               <p>Mengetahui,<br>Kepala Sekolah</p>
-              <div class="sig-box">
+              ${headmasterTteSnippet ? headmasterTteSnippet : ''}
+              <div class="sig-box" style="${headmasterTteSnippet ? 'margin-top: 0;' : ''}">
                 ${headmasterName || '( ................................................. )'}
                 <br><span style="font-weight: normal; font-size: 10px;">NIP. ${headmasterNip || '-'}</span>
                 ${headmasterRank ? `<br><span style="font-weight: normal; font-size: 9px; color: #475569;">${headmasterRank}</span>` : ''}
@@ -459,12 +876,14 @@ export default function DaftarNilai({
             </div>
             <div>
               <p>${documentCity}, ${dateStr}<br>Guru Mata Pelajaran</p>
-              <div class="sig-box">
+              ${teacherTteSnippet ? teacherTteSnippet : ''}
+              <div class="sig-box" style="${teacherTteSnippet ? 'margin-top: 0;' : ''}">
                 ${teacherName}
                 <br><span style="font-weight: normal; font-size: 10px;">NIP. ${nip || '-'}</span>
               </div>
             </div>
           </div>
+          ` : ''}
         </body>
         </html>
       `;
@@ -479,6 +898,12 @@ export default function DaftarNilai({
   };
 
   const initiateExport = () => {
+    if (!isAllExportSelected && selectedExportColumns.length === 0) {
+      setSyncNotice("Pilih minimal 1 komponen nilai untuk diekspor.");
+      setTimeout(() => setSyncNotice(""), 3500);
+      setIsExportDropdownOpen(true);
+      return;
+    }
     setPreviewData(getExportData());
     setIsPreviewOpen(true);
   };
@@ -513,6 +938,28 @@ export default function DaftarNilai({
         columns={exportColumns}
       />
 
+      {/* Modal Ekspor Siswa Belum Ulangan / Belum Ada Nilai Tugas */}
+      <ExportPendingTasksModal
+        isOpen={isPendingExportModalOpen}
+        onClose={() => setIsPendingExportModalOpen(false)}
+        students={students}
+        assignments={assignments}
+        submissions={submissions}
+        grades={grades}
+        initialClass={activeSelectedClass}
+        classList={availableClasses}
+        teacherName={teacherName}
+        nip={nip}
+        subject={subject}
+        institution={institution}
+        headmasterName={headmasterName}
+        headmasterNip={headmasterNip}
+        headmasterRank={headmasterRank}
+        documentCity={documentCity}
+        schoolNpsn={schoolNpsn}
+        academicYear={academicYear}
+      />
+
       {/* Configuration & Filter Bar */}
       <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 flex flex-col gap-4" id="nilai-header-bar">
         <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
@@ -522,7 +969,7 @@ export default function DaftarNilai({
               {availableClasses.map((cls) => (
                 <button
                   key={cls}
-                  onClick={() => setSelectedClass(cls)}
+                  onClick={() => handleSelectClass(cls)}
                   className={`px-4 py-2 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
                     activeSelectedClass === cls 
                       ? "bg-white text-indigo-600 shadow-sm" 
@@ -592,21 +1039,298 @@ export default function DaftarNilai({
             </div>
           </div>
 
-          {/* Export Action */}
-          <div className="flex gap-2 w-full md:w-auto justify-end items-center">
-            <select 
-              value={exportMode} 
-              onChange={(e) => setExportMode(e.target.value)}
-              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 outline-none focus:border-indigo-400"
+          {/* Export Action & Navigation */}
+          <div className="flex flex-wrap gap-2 w-full md:w-auto justify-end items-center">
+            {onNavigateToAssignments && (
+              <motion.button
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.96 }}
+                onClick={() => onNavigateToAssignments(activeSelectedClass)}
+                className="px-3.5 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 rounded-2xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                id="btn-goto-kelola-tugas"
+                title="Buka menu Kelola Tugas & Ulangan untuk kelas ini"
+              >
+                <Clipboard size={14} className="text-indigo-600" />
+                <span>Kelola Tugas & Ulangan</span>
+              </motion.button>
+            )}
+
+            <motion.button
+              whileHover={{ scale: 1.04 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={() => setIsRestoreModalOpen(true)}
+              className="px-3.5 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 rounded-2xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
+              id="btn-restore-grades"
+              title="Cadangkan atau Pulihkan Nilai & Tugas"
             >
-              <option value="all">Semua Nilai (Lengkap)</option>
-              {classAssignments.map(a => (
-                <option key={a.id} value={`assignment_${a.id}`}>Tugas: {a.title}</option>
-              ))}
-              <option value="pts">Nilai PTS</option>
-              <option value="pas">Nilai Ujian (PAS)</option>
-              <option value="sikap">Nilai Sikap</option>
-            </select>
+              <RotateCcw size={14} className="text-indigo-600" />
+              <span>Cadangkan / Pulihkan</span>
+            </motion.button>
+
+            {/* Tombol Ekspor Belum Ulangan / Tugas */}
+            <motion.button
+              whileHover={{ scale: 1.04 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={() => setIsPendingExportModalOpen(true)}
+              className="px-3.5 py-2.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300/80 rounded-2xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
+              id="btn-export-pending-grades"
+              title="Ekspor daftar siswa yang belum ulangan atau belum menyampaikan tugas/belum mendapat nilai (Excel/PDF)"
+            >
+              <AlertCircle size={14} className="text-amber-600" />
+              <span>Rekap Belum Ulangan / Tugas</span>
+            </motion.button>
+
+            {/* Tombol Isi Nilai 0 Tugas Belum Masuk */}
+            <motion.button
+              whileHover={{ scale: 1.04 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={handleFillZeroForMissingAssignments}
+              className="px-3.5 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-900 border border-rose-200/80 rounded-2xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
+              id="btn-fill-zero-missing-assignments"
+              title="Isikan nilai 0 secara massal untuk semua tugas siswa yang belum masuk di kelas ini"
+            >
+              <CheckSquare size={14} className="text-rose-600" />
+              <span>Isi 0 Tugas Belum Masuk</span>
+            </motion.button>
+
+            {/* Multi-Select Dropdown Komponen Ekspor */}
+            <div className="relative" ref={exportDropdownRef} id="export-column-multiselect-container">
+              <button
+                type="button"
+                onClick={() => setIsExportDropdownOpen(!isExportDropdownOpen)}
+                className="px-3 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 outline-none focus:border-indigo-400 flex items-center justify-between gap-2 min-w-[200px] max-w-[280px] cursor-pointer shadow-2xs transition-colors"
+                id="btn-export-column-selector"
+                title="Pilih satu atau lebih komponen nilai untuk diekspor"
+              >
+                <div className="flex items-center gap-1.5 truncate">
+                  <SlidersHorizontal size={13} className="text-indigo-600 shrink-0" />
+                  <span className="truncate">{getDropdownButtonLabel()}</span>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {!isAllExportSelected && selectedExportColumns.length > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-black">
+                      {selectedExportColumns.length}
+                    </span>
+                  )}
+                  <ChevronDown size={14} className={`text-slate-400 transition-transform duration-200 ${isExportDropdownOpen ? "rotate-180" : ""}`} />
+                </div>
+              </button>
+
+              {/* Dropdown Menu Panel */}
+              <AnimatePresence>
+                {isExportDropdownOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                    transition={{ duration: 0.15 }}
+                    className="absolute right-0 top-full mt-1.5 w-[330px] sm:w-[360px] bg-white rounded-2xl shadow-xl border border-slate-200 z-50 overflow-hidden flex flex-col max-h-[420px]"
+                    id="export-column-dropdown-panel"
+                  >
+                    {/* Header */}
+                    <div className="p-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-extrabold text-slate-800 block">Pilih Komponen Nilai</span>
+                        <span className="text-[10px] text-slate-500 font-medium">Bisa pilih lebih dari satu komponen</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={selectAllExport}
+                          className={`px-2 py-1 text-[10px] font-bold rounded-lg transition-colors cursor-pointer ${
+                            isAllExportSelected ? "bg-indigo-600 text-white" : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-100"
+                          }`}
+                        >
+                          Pilih Semua
+                        </button>
+                        <button
+                          type="button"
+                          onClick={clearAllExport}
+                          className="px-2 py-1 text-[10px] font-bold text-slate-500 hover:text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Quick presets buttons */}
+                    <div className="px-3 py-2 bg-slate-50/50 border-b border-slate-100 flex items-center gap-1.5 text-[11px] overflow-x-auto">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase shrink-0">Pintasan:</span>
+                      <button
+                        type="button"
+                        onClick={selectAllAssignmentsOnly}
+                        className="px-2 py-0.5 bg-white hover:bg-indigo-50 border border-slate-200 hover:border-indigo-300 text-slate-700 hover:text-indigo-700 rounded-md text-[10px] font-semibold shrink-0 transition-colors cursor-pointer"
+                      >
+                        Hanya Tugas ({classAssignments.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={selectAllExamsOnly}
+                        className="px-2 py-0.5 bg-white hover:bg-indigo-50 border border-slate-200 hover:border-indigo-300 text-slate-700 hover:text-indigo-700 rounded-md text-[10px] font-semibold shrink-0 transition-colors cursor-pointer"
+                      >
+                        Hanya Ulangan & Sikap
+                      </button>
+                    </div>
+
+                    {/* Special Rekap Siswa Belum Ulangan Link */}
+                    <div className="p-2 border-b border-slate-100 bg-amber-50/60">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsExportDropdownOpen(false);
+                          setIsPendingExportModalOpen(true);
+                        }}
+                        className="w-full px-2.5 py-1.5 bg-amber-100/70 hover:bg-amber-100 text-amber-900 border border-amber-300/80 rounded-xl text-xs font-black flex items-center justify-between cursor-pointer transition-colors text-left"
+                        id="dropdown-open-pending-recap"
+                      >
+                        <div className="flex items-center gap-1.5 truncate">
+                          <AlertCircle size={14} className="text-amber-600 shrink-0" />
+                          <span className="truncate">Rekap Siswa Belum Ulangan / Tugas</span>
+                        </div>
+                        <span className="text-[9px] bg-amber-200 text-amber-900 px-1.5 py-0.2 rounded font-mono shrink-0">PDF/Excel</span>
+                      </button>
+                    </div>
+
+                    {/* Scrollable list of checkboxes */}
+                    <div className="flex-1 overflow-y-auto p-2.5 space-y-3">
+                      {/* Opsi Semua Nilai */}
+                      <label className="flex items-center gap-2.5 p-2 rounded-xl hover:bg-indigo-50/60 cursor-pointer transition-colors border border-transparent hover:border-indigo-100 select-none">
+                        <input
+                          type="checkbox"
+                          checked={isAllExportSelected}
+                          onChange={() => toggleExportColumn("all")}
+                          className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                        />
+                        <div className="flex-1">
+                          <span className="text-xs font-black text-slate-800 block">Semua Nilai (Lengkap)</span>
+                          <span className="text-[10px] text-slate-400">Ekspor seluruh tugas, PTS, PAS, sikap, dan nilai akhir</span>
+                        </div>
+                      </label>
+
+                      {/* Kelompok Tugas */}
+                      {classAssignments.length > 0 && (
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between px-2 pt-1">
+                            <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">
+                              Tugas & Aktivitas ({classAssignments.length})
+                            </span>
+                          </div>
+                          <div className="space-y-0.5">
+                            {classAssignments.map(a => {
+                              const optId = `assignment_${a.id}`;
+                              const isChecked = isAllExportSelected || selectedExportColumns.includes(optId);
+                              return (
+                                <label
+                                  key={a.id}
+                                  className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-xl cursor-pointer transition-colors select-none ${
+                                    isChecked ? "bg-indigo-50/40 text-slate-900 font-semibold" : "hover:bg-slate-50 text-slate-600"
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={() => toggleExportColumn(optId)}
+                                    className="w-3.5 h-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                                  />
+                                  <span className="text-xs truncate flex-1" title={a.title}>
+                                    Tugas: {a.title}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Kelompok Ulangan & Sikap */}
+                      <div className="space-y-1">
+                        <div className="px-2 pt-1">
+                          <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">
+                            Penilaian Ulangan & Sikap
+                          </span>
+                        </div>
+                        <div className="space-y-0.5">
+                          {[
+                            { id: "pts", label: "Nilai PTS (STS)" },
+                            { id: "pas", label: "Nilai Ujian (PAS / SAS)" },
+                            { id: "sikap", label: "Nilai Sikap" },
+                          ].map(opt => {
+                            const isChecked = isAllExportSelected || selectedExportColumns.includes(opt.id);
+                            return (
+                              <label
+                                key={opt.id}
+                                className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-xl cursor-pointer transition-colors select-none ${
+                                  isChecked ? "bg-indigo-50/40 text-slate-900 font-semibold" : "hover:bg-slate-50 text-slate-600"
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => toggleExportColumn(opt.id)}
+                                  className="w-3.5 h-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                                />
+                                <span className="text-xs flex-1">
+                                  {opt.label}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Kelompok Hasil Akhir */}
+                      <div className="space-y-1">
+                        <div className="px-2 pt-1">
+                          <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">
+                            Hasil Akhir & Status
+                          </span>
+                        </div>
+                        <div className="space-y-0.5">
+                          {[
+                            { id: "final_score", label: "Nilai Akhir" },
+                            { id: "status", label: "Status Kelulusan (Lulus/Remedial)" },
+                          ].map(opt => {
+                            const isChecked = isAllExportSelected || selectedExportColumns.includes(opt.id);
+                            return (
+                              <label
+                                key={opt.id}
+                                className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-xl cursor-pointer transition-colors select-none ${
+                                  isChecked ? "bg-indigo-50/40 text-slate-900 font-semibold" : "hover:bg-slate-50 text-slate-600"
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => toggleExportColumn(opt.id)}
+                                  className="w-3.5 h-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                                />
+                                <span className="text-xs flex-1">
+                                  {opt.label}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Footer */}
+                    <div className="p-2.5 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
+                      <span className="text-[11px] font-bold text-slate-500">
+                        {isAllExportSelected ? "Semua kolom aktif" : `${selectedExportColumns.length} kolom dipilih`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setIsExportDropdownOpen(false)}
+                        className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+                      >
+                        Selesai
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
 
             <motion.button
               whileHover={{ scale: 1.05 }}
@@ -619,6 +1343,40 @@ export default function DaftarNilai({
             </motion.button>
           </div>
         </div>
+
+        {/* Sync Notice Alert */}
+        <AnimatePresence>
+          {syncNotice && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-800 font-bold shadow-sm"
+            >
+              <div className="flex items-center gap-2">
+                <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                <span>{syncNotice}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                {onNavigateToAssignments && (
+                  <button
+                    onClick={() => onNavigateToAssignments(activeSelectedClass)}
+                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold transition-colors cursor-pointer flex items-center gap-1 shadow-2xs"
+                  >
+                    <span>Lihat di Kelola Tugas</span>
+                    <span aria-hidden="true">&rarr;</span>
+                  </button>
+                )}
+                <button 
+                  onClick={() => setSyncNotice("")} 
+                  className="text-emerald-500 hover:text-emerald-700 p-1 cursor-pointer"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Primary View Mode Switcher Tab */}
         <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
@@ -674,13 +1432,92 @@ export default function DaftarNilai({
         </div>
       </div>
 
+      {/* Dynamic Calculation Mode Bar */}
+      <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs" id="calc-mode-bar">
+        <div className="flex items-center gap-2.5 text-indigo-950 font-medium">
+          <div className="p-1.5 bg-indigo-600 text-white rounded-lg shrink-0">
+            <Info size={15} />
+          </div>
+          <div>
+            <span className="font-bold text-slate-900 block">
+              {onlyCalculateInputted 
+                ? "Mode Aktif: Variabel & Rata-rata Hanya dari Nilai yang Terinput" 
+                : "Mode Standar: Menghitung Seluruh Komponen (Nilai Kosong Dianggap 0)"}
+            </span>
+            <span className="text-[11px] text-slate-500 font-normal">
+              {onlyCalculateInputted
+                ? "Komponen nilai kosong & ulangan yang belum diadakan dikecualikan dari pembagi rata-rata, persentase kelulusan, nilai tertinggi & terendah."
+                : "Semua bobot komponen dihitung secara statis (nilai belum ada dianggap 0)."}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-1.5 cursor-pointer select-none bg-white px-3 py-1.5 rounded-xl border border-indigo-200 text-slate-700 hover:bg-indigo-50/50 transition-colors">
+            <input
+              type="checkbox"
+              checked={onlyCalculateInputted}
+              onChange={(e) => setOnlyCalculateInputted(e.target.checked)}
+              className="w-3.5 h-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+              id="checkbox-only-inputted"
+            />
+            <span className="font-bold text-xs">Hanya Nilai Terinput</span>
+          </label>
+
+          {onlyCalculateInputted && (
+            <label className="flex items-center gap-1.5 cursor-pointer select-none bg-white px-3 py-1.5 rounded-xl border border-indigo-200 text-slate-700 hover:bg-indigo-50/50 transition-colors">
+              <input
+                type="checkbox"
+                checked={treatZeroAsEmpty}
+                onChange={(e) => setTreatZeroAsEmpty(e.target.checked)}
+                className="w-3.5 h-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                id="checkbox-treat-zero-empty"
+              />
+              <span className="font-bold text-xs">Abaikan Nilai 0 (Belum Ujian)</span>
+            </label>
+          )}
+        </div>
+      </div>
+
       {/* Class Statistics Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" id="nilai-stats-row">
         {[
-          { label: "Rata-rata Kelas", value: stats.average, desc: "Beban KKM: 75", color: "text-indigo-600", bg: "bg-indigo-50 border-indigo-100", icon: TrendingUp },
-          { label: "Kelulusan Kelas", value: `${stats.passRate}%`, desc: `${stats.passingCount} siswa lulus`, color: "text-violet-600", bg: "bg-violet-50 border-violet-100", icon: Percent },
-          { label: "Nilai Tertinggi", value: stats.highest, desc: "Prestasi puncak", color: "text-amber-600", bg: "bg-amber-50 border-amber-100", icon: Award },
-          { label: "Nilai Terendah", value: stats.lowest, desc: "Perlu bimbingan", color: "text-rose-600", bg: "bg-rose-50 border-rose-100", icon: TrendingDown }
+          { 
+            label: "Rata-rata Kelas", 
+            value: stats.average, 
+            desc: stats.scoredStudentsCount > 0 
+              ? `KKM: 75 • Dari ${stats.scoredStudentsCount} siswa terinput` 
+              : "Belum ada nilai terinput", 
+            color: "text-indigo-600", 
+            bg: "bg-indigo-50 border-indigo-100", 
+            icon: TrendingUp 
+          },
+          { 
+            label: "Kelulusan Kelas", 
+            value: `${stats.passRate}%`, 
+            desc: stats.scoredStudentsCount > 0 
+              ? `${stats.passingCount} dari ${stats.scoredStudentsCount} siswa dinilai lulus` 
+              : "0 siswa lulus", 
+            color: "text-violet-600", 
+            bg: "bg-violet-50 border-violet-100", 
+            icon: Percent 
+          },
+          { 
+            label: "Nilai Tertinggi", 
+            value: stats.highest, 
+            desc: stats.scoredStudentsCount > 0 ? "Prestasi puncak (terinput)" : "Belum ada nilai", 
+            color: "text-amber-600", 
+            bg: "bg-amber-50 border-amber-100", 
+            icon: Award 
+          },
+          { 
+            label: "Nilai Terendah", 
+            value: stats.lowest, 
+            desc: stats.scoredStudentsCount > 0 ? "Perlu bimbingan (terinput)" : "Belum ada nilai", 
+            color: "text-rose-600", 
+            bg: "bg-rose-50 border-rose-100", 
+            icon: TrendingDown 
+          }
         ].map((st, idx) => (
           <motion.div
             key={st.label}
@@ -739,8 +1576,18 @@ export default function DaftarNilai({
                   <th className="py-3 px-2 sm:px-4 w-[115px] sm:w-[220px] min-w-[115px] sm:min-w-[220px] max-w-[115px] sm:max-w-[220px] sticky left-[36px] sm:left-[50px] z-20 bg-slate-50 border-r border-slate-100 shadow-[4px_0_10px_-2px_rgba(0,0,0,0.12)] sm:shadow-none truncate">Nama Siswa</th>
                   <th className="py-3 px-2 sm:px-4 w-[90px] sm:w-[110px] min-w-[90px] sm:min-w-[110px] max-w-[90px] sm:max-w-[110px] static sm:sticky sm:left-[270px] z-10 sm:z-20 bg-slate-50 border-r border-slate-100 sm:shadow-[4px_0_12px_-4px_rgba(0,0,0,0.08)]">NIS</th>
                   {classAssignments.map(a => (
-                    <th key={a.id} className="py-3 px-4 min-w-[100px] text-center" title={a.title}>
-                      {a.title.length > 15 ? a.title.slice(0, 15) + "..." : a.title}
+                    <th 
+                      key={a.id} 
+                      className="py-3 px-3 min-w-[110px] text-center group cursor-pointer hover:bg-indigo-50/60 transition-colors" 
+                      title={`${a.title} (${a.category || 'Tugas'}) - Klik untuk buka di Kelola Tugas`}
+                      onClick={() => onNavigateToAssignments && onNavigateToAssignments(activeSelectedClass)}
+                    >
+                      <div className="flex flex-col items-center gap-0.5">
+                        <span className="truncate max-w-[115px] font-bold text-slate-700 group-hover:text-indigo-600 transition-colors">{a.title}</span>
+                        <span className="text-[9px] font-bold px-1.5 py-0.2 bg-indigo-50 text-indigo-600 rounded group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                          {a.category || "Tugas"}
+                        </span>
+                      </div>
                     </th>
                   ))}
                   <th className="py-3 px-4 min-w-[90px] text-center">PTS</th>
@@ -766,18 +1613,14 @@ export default function DaftarNilai({
                     };
                   }
 
-                  const assignmentScoresList = classAssignments.map(a => gradeObj!.assignmentScores[a.id] || 0);
-                  const assignmentAvg = assignmentScoresList.length > 0 
-                    ? assignmentScoresList.reduce((sum, v) => sum + v, 0) / assignmentScoresList.length 
-                    : 0;
-                  
-                  const finalGrade = Math.round(
-                    (assignmentAvg * (assignmentWeight / 100)) + 
-                    ((gradeObj.midtermScore || 0) * (midtermWeight / 100)) +
-                    (gradeObj.examScore * (examWeight / 100)) +
-                    ((gradeObj.characterScore || 0) * (characterWeight / 100))
+                  const scoreResult = calculateStudentScore(
+                    student,
+                    gradeObj,
+                    classAssignments,
+                    { assignment: assignmentWeight, midterm: midtermWeight, exam: examWeight, character: characterWeight },
+                    onlyCalculateInputted,
+                    treatZeroAsEmpty
                   );
-                  const isPass = finalGrade >= 75;
 
                   const studentSubmissionsCount = submissions.filter(s => s.studentId === student.id).length;
 
@@ -789,15 +1632,18 @@ export default function DaftarNilai({
                       
                       {/* Assignment cells */}
                       {classAssignments.map(a => {
-                        const assignmentScore = gradeObj!.assignmentScores[a.id] || 0;
+                        const rawScore = gradeObj!.assignmentScores[a.id];
+                        const hasScore = rawScore !== undefined && rawScore !== null;
+                        // Aturan: Jika tugas belum masuk isikan dengan nilai 0
+                        const effectiveScore = hasScore ? rawScore : 0;
                         const isEditing = editingCell?.studentId === student.id && editingCell?.type === a.id;
                         
                         return (
                           <td 
                             key={a.id} 
                             className="py-3 px-3 text-center cursor-pointer relative group/cell hover:bg-indigo-50/50 transition-colors"
-                            onClick={() => triggerEdit(student.id, a.id, assignmentScore)}
-                            onDoubleClick={() => triggerEdit(student.id, a.id, assignmentScore)}
+                            onClick={() => triggerEdit(student.id, a.id, effectiveScore)}
+                            onDoubleClick={() => triggerEdit(student.id, a.id, effectiveScore)}
                           >
                             {isEditing ? (
                               <input
@@ -812,7 +1658,13 @@ export default function DaftarNilai({
                               />
                             ) : (
                               <div className="flex items-center justify-center gap-1">
-                                <span className="font-semibold text-slate-700">{assignmentScore}</span>
+                                <span className={`text-xs ${
+                                  hasScore 
+                                    ? (rawScore === 0 ? "font-bold text-rose-600" : "font-semibold text-slate-700") 
+                                    : "font-bold text-rose-500 bg-rose-50/80 px-1.5 py-0.5 rounded shadow-2xs"
+                                }`} title={!hasScore ? "Tugas belum masuk (nilai 0)" : `Nilai: ${rawScore}`}>
+                                  {effectiveScore}
+                                </span>
                                 <Edit size={10} className="text-slate-300 opacity-0 group-hover/cell:opacity-100 transition-opacity" />
                               </div>
                             )}
@@ -821,94 +1673,132 @@ export default function DaftarNilai({
                       })}
 
                       {/* Midterm (PTS) cell */}
-                      <td 
-                        className="py-3 px-3 text-center cursor-pointer relative group/cell hover:bg-indigo-50/50 transition-colors"
-                        onClick={() => triggerEdit(student.id, "midterm", gradeObj!.midtermScore || 0)}
-                        onDoubleClick={() => triggerEdit(student.id, "midterm", gradeObj!.midtermScore || 0)}
-                      >
-                        {editingCell?.studentId === student.id && editingCell?.type === "midterm" ? (
-                          <input
-                            type="number"
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onBlur={saveCellEdit}
-                            onKeyDown={(e) => e.key === "Enter" && saveCellEdit()}
-                            className="w-14 bg-white border-2 border-indigo-500 rounded-lg px-1 py-0.5 font-bold text-slate-800 focus:outline-none text-center shadow-sm"
-                            autoFocus
-                            id={`cell-input-${student.id}-midterm`}
-                          />
-                        ) : (
-                          <div className="flex items-center justify-center gap-1">
-                            <span className="font-semibold text-slate-700">{gradeObj!.midtermScore || 0}</span>
-                            <Edit size={10} className="text-slate-300 opacity-0 group-hover/cell:opacity-100 transition-opacity" />
-                          </div>
-                        )}
-                      </td>
+                      {(() => {
+                        const rawMidterm = gradeObj?.midtermScore;
+                        const hasMidterm = rawMidterm !== undefined && rawMidterm !== null && (!treatZeroAsEmpty || rawMidterm > 0);
+                        const displayMidterm = hasMidterm ? rawMidterm : "-";
+                        return (
+                          <td 
+                            className="py-3 px-3 text-center cursor-pointer relative group/cell hover:bg-indigo-50/50 transition-colors"
+                            onClick={() => triggerEdit(student.id, "midterm", hasMidterm ? rawMidterm : undefined)}
+                            onDoubleClick={() => triggerEdit(student.id, "midterm", hasMidterm ? rawMidterm : undefined)}
+                          >
+                            {editingCell?.studentId === student.id && editingCell?.type === "midterm" ? (
+                              <input
+                                type="number"
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                onBlur={saveCellEdit}
+                                onKeyDown={(e) => e.key === "Enter" && saveCellEdit()}
+                                className="w-14 bg-white border-2 border-indigo-500 rounded-lg px-1 py-0.5 font-bold text-slate-800 focus:outline-none text-center shadow-sm"
+                                autoFocus
+                                id={`cell-input-${student.id}-midterm`}
+                              />
+                            ) : (
+                              <div className="flex items-center justify-center gap-1">
+                                <span className={`font-semibold ${displayMidterm !== "-" ? "text-slate-700" : "text-slate-300 font-normal"}`}>{displayMidterm}</span>
+                                <Edit size={10} className="text-slate-300 opacity-0 group-hover/cell:opacity-100 transition-opacity" />
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })()}
 
                       {/* Exam cell */}
-                      <td 
-                        className="py-3 px-3 text-center cursor-pointer relative group/cell hover:bg-indigo-50/50 transition-colors"
-                        onClick={() => triggerEdit(student.id, "exam", gradeObj!.examScore)}
-                        onDoubleClick={() => triggerEdit(student.id, "exam", gradeObj!.examScore)}
-                      >
-                        {editingCell?.studentId === student.id && editingCell?.type === "exam" ? (
-                          <input
-                            type="number"
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onBlur={saveCellEdit}
-                            onKeyDown={(e) => e.key === "Enter" && saveCellEdit()}
-                            className="w-14 bg-white border-2 border-indigo-500 rounded-lg px-1 py-0.5 font-bold text-slate-800 focus:outline-none text-center shadow-sm"
-                            autoFocus
-                            id={`cell-input-${student.id}-exam`}
-                          />
-                        ) : (
-                          <div className="flex items-center justify-center gap-1">
-                            <span className="font-semibold text-slate-700">{gradeObj!.examScore}</span>
-                            <Edit size={10} className="text-slate-300 opacity-0 group-hover/cell:opacity-100 transition-opacity" />
-                          </div>
-                        )}
-                      </td>
+                      {(() => {
+                        const rawExam = gradeObj?.examScore;
+                        const hasExam = rawExam !== undefined && rawExam !== null && (!treatZeroAsEmpty || rawExam > 0);
+                        const displayExam = hasExam ? rawExam : "-";
+                        return (
+                          <td 
+                            className="py-3 px-3 text-center cursor-pointer relative group/cell hover:bg-indigo-50/50 transition-colors"
+                            onClick={() => triggerEdit(student.id, "exam", hasExam ? rawExam : undefined)}
+                            onDoubleClick={() => triggerEdit(student.id, "exam", hasExam ? rawExam : undefined)}
+                          >
+                            {editingCell?.studentId === student.id && editingCell?.type === "exam" ? (
+                              <input
+                                type="number"
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                onBlur={saveCellEdit}
+                                onKeyDown={(e) => e.key === "Enter" && saveCellEdit()}
+                                className="w-14 bg-white border-2 border-indigo-500 rounded-lg px-1 py-0.5 font-bold text-slate-800 focus:outline-none text-center shadow-sm"
+                                autoFocus
+                                id={`cell-input-${student.id}-exam`}
+                              />
+                            ) : (
+                              <div className="flex items-center justify-center gap-1">
+                                <span className={`font-semibold ${displayExam !== "-" ? "text-slate-700" : "text-slate-300 font-normal"}`}>{displayExam}</span>
+                                <Edit size={10} className="text-slate-300 opacity-0 group-hover/cell:opacity-100 transition-opacity" />
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })()}
 
                       {/* Character (Sikap) cell */}
-                      <td 
-                        className="py-3 px-3 text-center cursor-pointer relative group/cell hover:bg-indigo-50/50 transition-colors"
-                        onClick={() => triggerEdit(student.id, "character", gradeObj!.characterScore || 0)}
-                        onDoubleClick={() => triggerEdit(student.id, "character", gradeObj!.characterScore || 0)}
-                      >
-                        {editingCell?.studentId === student.id && editingCell?.type === "character" ? (
-                          <input
-                            type="number"
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onBlur={saveCellEdit}
-                            onKeyDown={(e) => e.key === "Enter" && saveCellEdit()}
-                            className="w-14 bg-white border-2 border-indigo-500 rounded-lg px-1 py-0.5 font-bold text-slate-800 focus:outline-none text-center shadow-sm"
-                            autoFocus
-                            id={`cell-input-${student.id}-character`}
-                          />
-                        ) : (
-                          <div className="flex items-center justify-center gap-1">
-                            <span className="font-semibold text-slate-700">{gradeObj!.characterScore || 0}</span>
-                            <Edit size={10} className="text-slate-300 opacity-0 group-hover/cell:opacity-100 transition-opacity" />
-                          </div>
-                        )}
-                      </td>
+                      {(() => {
+                        const rawChar = gradeObj?.characterScore;
+                        const hasChar = rawChar !== undefined && rawChar !== null && (!treatZeroAsEmpty || rawChar > 0);
+                        const displayChar = hasChar ? rawChar : "-";
+                        return (
+                          <td 
+                            className="py-3 px-3 text-center cursor-pointer relative group/cell hover:bg-indigo-50/50 transition-colors"
+                            onClick={() => triggerEdit(student.id, "character", hasChar ? rawChar : undefined)}
+                            onDoubleClick={() => triggerEdit(student.id, "character", hasChar ? rawChar : undefined)}
+                          >
+                            {editingCell?.studentId === student.id && editingCell?.type === "character" ? (
+                              <input
+                                type="number"
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                onBlur={saveCellEdit}
+                                onKeyDown={(e) => e.key === "Enter" && saveCellEdit()}
+                                className="w-14 bg-white border-2 border-indigo-500 rounded-lg px-1 py-0.5 font-bold text-slate-800 focus:outline-none text-center shadow-sm"
+                                autoFocus
+                                id={`cell-input-${student.id}-character`}
+                              />
+                            ) : (
+                              <div className="flex items-center justify-center gap-1">
+                                <span className={`font-semibold ${displayChar !== "-" ? "text-slate-700" : "text-slate-300 font-normal"}`}>{displayChar}</span>
+                                <Edit size={10} className="text-slate-300 opacity-0 group-hover/cell:opacity-100 transition-opacity" />
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })()}
 
                       {/* Final grade display */}
-                      <td className="py-3 px-4 text-center font-black text-sm text-slate-800 bg-slate-100/10">
-                        {finalGrade}
+                      <td className="py-3 px-4 text-center font-black text-sm text-slate-800 bg-slate-100/10" title={scoreResult.componentsSummary}>
+                        {scoreResult.finalScore !== null ? (
+                          <div className="flex flex-col items-center">
+                            <span>{scoreResult.finalScore}</span>
+                            {onlyCalculateInputted && scoreResult.activeWeightSum < 100 && (
+                              <span className="text-[9px] font-normal text-indigo-600">
+                                (bobot {scoreResult.activeWeightSum}%)
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-slate-300 font-normal">-</span>
+                        )}
                       </td>
 
                       {/* Status badge */}
                       <td className="py-3 px-4 text-center">
-                        <span className={`px-2 py-0.5 text-[9px] font-bold rounded-full uppercase tracking-wider ${
-                          isPass 
-                            ? "bg-emerald-100 text-emerald-800" 
-                            : "bg-rose-100 text-rose-800"
-                        }`}>
-                          {isPass ? "Lulus" : "Remedial"}
-                        </span>
+                        {scoreResult.finalScore !== null ? (
+                          <span className={`px-2 py-0.5 text-[9px] font-bold rounded-full uppercase tracking-wider ${
+                            scoreResult.isPass 
+                              ? "bg-emerald-100 text-emerald-800" 
+                              : "bg-rose-100 text-rose-800"
+                          }`}>
+                            {scoreResult.isPass ? "Lulus" : "Remedial"}
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-[9px] font-medium rounded-full bg-slate-100 text-slate-400">
+                            Belum Dinilai
+                          </span>
+                        )}
                       </td>
 
                       {/* Action to view history / edit answer */}
@@ -988,18 +1878,16 @@ export default function DaftarNilai({
                   };
                 }
 
-                const assignmentScoresList = classAssignments.map(a => gradeObj!.assignmentScores[a.id] || 0);
-                const assignmentAvg = assignmentScoresList.length > 0 
-                  ? assignmentScoresList.reduce((sum, v) => sum + v, 0) / assignmentScoresList.length 
-                  : 0;
-                
-                const finalGrade = Math.round(
-                  (assignmentAvg * (assignmentWeight / 100)) + 
-                  ((gradeObj.midtermScore || 0) * (midtermWeight / 100)) +
-                  (gradeObj.examScore * (examWeight / 100)) +
-                  ((gradeObj.characterScore || 0) * (characterWeight / 100))
+                const scoreResult = calculateStudentScore(
+                  student,
+                  gradeObj,
+                  classAssignments,
+                  { assignment: assignmentWeight, midterm: midtermWeight, exam: examWeight, character: characterWeight },
+                  onlyCalculateInputted,
+                  treatZeroAsEmpty
                 );
-                const isPass = finalGrade >= 75;
+                const finalGrade = scoreResult.finalScore;
+                const isPass = scoreResult.isPass;
                 const studentSubmissionsCount = submissions.filter(s => s.studentId === student.id).length;
 
                 return (
@@ -1012,12 +1900,20 @@ export default function DaftarNilai({
                       <div className="text-right shrink-0">
                         <span className="text-[10px] font-bold text-slate-400 block uppercase">Nilai Akhir</span>
                         <div className="flex items-center gap-1.5 justify-end">
-                          <span className="font-black text-lg text-slate-900">{finalGrade}</span>
-                          <span className={`px-2 py-0.5 text-[9px] font-black rounded-full uppercase tracking-wider ${
-                            isPass ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"
-                          }`}>
-                            {isPass ? "Lulus" : "Remedial"}
-                          </span>
+                          {finalGrade !== null ? (
+                            <>
+                              <span className="font-black text-lg text-slate-900">{finalGrade}</span>
+                              <span className={`px-2 py-0.5 text-[9px] font-black rounded-full uppercase tracking-wider ${
+                                isPass ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"
+                              }`}>
+                                {isPass ? "Lulus" : "Remedial"}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="px-2 py-0.5 text-[10px] font-medium rounded-full bg-slate-100 text-slate-400">
+                              Belum Dinilai
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1579,6 +2475,18 @@ export default function DaftarNilai({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Restore & Backup Penilaian Modal */}
+      <MenuDataRestoreModal
+        isOpen={isRestoreModalOpen}
+        onClose={() => setIsRestoreModalOpen(false)}
+        menuTitle="Daftar Nilai & Penilaian"
+        menuKey="grades"
+        currentDataCount={grades.length}
+        currentDataSummary={`Mencakup ${grades.length} rekaman nilai siswa, ${assignments.length} tugas & ulangan, dan ${(submissions || []).length} riwayat penyerahan.`}
+        onExportBackup={handleExportGradesJson}
+        onRestoreData={handleRestoreGradesData}
+      />
     </div>
   );
 }

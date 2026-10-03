@@ -65,6 +65,8 @@ export interface GuruSyncPayload {
   homeVisits: HomeVisitReport[];
   materials?: LearningMaterial[];
   bankQuestions?: QuestionBankItem[];
+  eduasistenSessions?: any[];
+  savedModules?: any[];
   lastUpdated: number;
   updatedBy: string;
   _isChunked?: boolean;
@@ -137,7 +139,7 @@ async function saveLargePayloadToFirestore(
       ...metaExtra,
       _isChunked: false,
       _totalSize: totalBytes
-    }, { merge: true });
+    });
 
     return { totalSize: totalBytes, isChunked: false };
   }

@@ -1,14 +1,70 @@
 {
-  "users": {
-    "$uid": {
-      "fields": {
-        "email": "string",
-        "name": "string",
-        "role": "string",
-        "photoURL": "string",
-        "createdAt": "timestamp"
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and authentication entity",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string" },
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "status": { "type": "string" }
       },
-      "indexes": []
+      "required": ["uid", "username", "role"]
+    },
+    "GuruData": {
+      "title": "GuruData",
+      "description": "Complete teacher academic data, administration, and learning materials",
+      "type": "object",
+      "properties": {
+        "syncKey": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "nip": { "type": "string" },
+        "subject": { "type": "string" },
+        "lastUpdated": { "type": "number" }
+      },
+      "required": ["syncKey", "lastUpdated"]
+    },
+    "SchoolMaster": {
+      "title": "SchoolMaster",
+      "description": "Master school data including classes and students",
+      "type": "object",
+      "properties": {
+        "classList": { "type": "array" },
+        "studentList": { "type": "array" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User account document"
+    },
+    "/guru_data/{syncKey}": {
+      "schema": "GuruData",
+      "description": "Realtime teacher database partition"
+    },
+    "/guru_daily_backups/{backupId}": {
+      "schema": "GuruData",
+      "description": "Daily backups collection"
+    },
+    "/guru_backup_indexes/{syncKey}": {
+      "schema": "GuruData",
+      "description": "Backup indexes collection"
+    },
+    "/school_master/{docId}": {
+      "schema": "SchoolMaster",
+      "description": "School master administrative data"
+    },
+    "/user_activities/{actId}": {
+      "schema": "User",
+      "description": "System activity logs"
+    },
+    "/password_reset_requests/{reqId}": {
+      "schema": "User",
+      "description": "Password reset requests"
     }
   }
 }

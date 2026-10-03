@@ -38,11 +38,14 @@ import {
   Bookmark,
   FileCode,
   FolderOpen,
-  ShieldAlert
+  ShieldAlert,
+  RotateCcw,
+  Database
 } from "lucide-react";
 import { LearningMaterial, MaterialType, LearningMaterialNote, Student } from "../types";
 import { CLASSES } from "../data/presets";
 import { convertToEmbedUrl, extractGoogleDriveId } from "../lib/driveUtils";
+import MenuDataRestoreModal from "./MenuDataRestoreModal";
 
 interface RuangBelajarProps {
   materials: LearningMaterial[];
@@ -50,6 +53,7 @@ interface RuangBelajarProps {
   onEditMaterial: (updatedMat: LearningMaterial) => void;
   onDeleteMaterial: (id: string) => void;
   onAddMaterialNote?: (materialId: string, noteText: string, timestamp?: string) => void;
+  onRestoreMaterials?: (items: LearningMaterial[], mode: "merge" | "replace") => void;
   classList?: string[];
   students?: Student[];
   teacherName?: string;
@@ -63,6 +67,7 @@ export default function RuangBelajar({
   onEditMaterial,
   onDeleteMaterial,
   onAddMaterialNote,
+  onRestoreMaterials,
   classList,
   students = [],
   teacherName = "YUDI GINANJAR",
@@ -97,6 +102,80 @@ export default function RuangBelajar({
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingMaterial, setEditingMaterial] = useState<LearningMaterial | null>(null);
   const [isDriveGuideModalOpen, setIsDriveGuideModalOpen] = useState(false);
+  const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
+
+  // Export Learning Materials JSON Backup
+  const handleExportMaterialsJson = () => {
+    const backupPayload = {
+      app: "EduAsisten",
+      version: "2.5",
+      category: "materials",
+      exportedAt: new Date().toISOString(),
+      materialsCount: materials.length,
+      materials: materials
+    };
+    const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Backup_Ruang_Belajar_Media_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  // Restore Learning Materials Data Handler
+  const handleRestoreMaterialsData = (importedData: any, mode: "merge" | "replace") => {
+    let list: LearningMaterial[] = [];
+    if (Array.isArray(importedData)) {
+      list = importedData;
+    } else if (importedData && Array.isArray(importedData.materials)) {
+      list = importedData.materials;
+    } else if (importedData && Array.isArray(importedData.learningMaterials)) {
+      list = importedData.learningMaterials;
+    }
+
+    if (!Array.isArray(list) || list.length === 0) {
+      return { success: false, message: "Tidak ditemukan data media pembelajaran yang valid dalam berkas." };
+    }
+
+    const validList: LearningMaterial[] = list
+      .filter(item => item && item.title && (item.driveUrl || item.embedUrl))
+      .map(item => ({
+        id: item.id || `mat-${Date.now()}-${Math.floor(Math.random()*1000)}`,
+        title: item.title,
+        description: item.description || "",
+        subject: item.subject || subject || "EKONOMI",
+        className: item.className || "Semua Kelas",
+        targetClasses: Array.isArray(item.targetClasses) ? item.targetClasses : [availableClasses[0] || "XII-C2"],
+        type: item.type || "presentation",
+        driveUrl: item.driveUrl || "",
+        embedUrl: item.embedUrl || item.driveUrl || "",
+        topic: item.topic || item.bab || "BAB Pembelajaran",
+        bab: item.bab || item.topic || "BAB Pembelajaran",
+        subBab: item.subBab || "1.1 Pembelajaran",
+        tags: Array.isArray(item.tags) ? item.tags : [],
+        createdAt: item.createdAt || new Date().toISOString().slice(0, 10),
+        notes: Array.isArray(item.notes) ? item.notes : []
+      }));
+
+    if (validList.length === 0) {
+      return { success: false, message: "Format media pembelajaran tidak sesuai dengan struktur sistem." };
+    }
+
+    if (onRestoreMaterials) {
+      onRestoreMaterials(validList, mode);
+    } else {
+      validList.forEach(m => onAddMaterial(m));
+    }
+
+    return {
+      success: true,
+      count: validList.length,
+      message: `Berhasil memulihkan ${validList.length} media pembelajaran (${mode === "merge" ? "Gabung & Lengkapi" : "Ganti Total"})!`
+    };
+  };
 
   // Form state for Add/Edit
   const [formData, setFormData] = useState<{
@@ -419,14 +498,28 @@ export default function RuangBelajar({
                 <span>Tambah Materi Google Drive</span>
               </motion.button>
 
-              <button
-                onClick={() => setIsDriveGuideModalOpen(true)}
-                className="px-4 py-2 bg-white/10 hover:bg-white/20 text-indigo-100 font-bold text-xs rounded-xl flex items-center gap-1.5 justify-center cursor-pointer transition-colors border border-white/10"
-                id="btn-drive-guide"
-              >
-                <HelpCircle size={14} className="text-emerald-400" />
-                <span>Panduan Link Google Drive</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsRestoreModalOpen(true)}
+                  className="flex-1 px-3 py-2 bg-white/10 hover:bg-white/20 text-indigo-100 font-bold text-xs rounded-xl flex items-center gap-1.5 justify-center cursor-pointer transition-colors border border-white/10"
+                  id="btn-restore-materials"
+                  title="Cadangkan atau Pulihkan Data Media Pembelajaran"
+                >
+                  <RotateCcw size={13} className="text-amber-400" />
+                  <span>Cadangkan / Pulihkan</span>
+                </button>
+
+                <button
+                  onClick={() => setIsDriveGuideModalOpen(true)}
+                  className="px-3 py-2 bg-white/10 hover:bg-white/20 text-indigo-100 font-bold text-xs rounded-xl flex items-center gap-1.5 justify-center cursor-pointer transition-colors border border-white/10"
+                  id="btn-drive-guide"
+                  title="Panduan Berbagi Link Google Drive"
+                >
+                  <HelpCircle size={14} className="text-emerald-400" />
+                  <span>Panduan</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1501,6 +1594,18 @@ export default function RuangBelajar({
           </div>
         )}
       </AnimatePresence>
+
+      {/* Restore & Backup Ruang Belajar Modal */}
+      <MenuDataRestoreModal
+        isOpen={isRestoreModalOpen}
+        onClose={() => setIsRestoreModalOpen(false)}
+        menuTitle="Ruang Belajar (Pustaka Media & Drive)"
+        menuKey="materials"
+        currentDataCount={materials.length}
+        currentDataSummary={`Menyimpan ${materials.length} media pembelajaran (PowerPoint, Google Slides, Video & Modul) yang terhubung ke Google Drive.`}
+        onExportBackup={handleExportMaterialsJson}
+        onRestoreData={handleRestoreMaterialsData}
+      />
     </div>
   );
 }
