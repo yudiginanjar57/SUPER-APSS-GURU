@@ -2939,9 +2939,9 @@ export default function App() {
       ]
     : [
         { id: "dashboard", label: "Beranda", icon: LayoutDashboard },
+        { id: "eduasisten", label: "EduAsisten AI", icon: Bot },
         { id: "ruangbelajar", label: "Ruang Belajar", icon: MonitorPlay },
         { id: "evaluasi", label: "Evaluasi & Bank Soal (CBT)", icon: ShieldAlert },
-        { id: "eduasisten", label: "EduAsisten AI", icon: Bot },
         { id: "walikelas", label: "Ruang Wali Kelas", icon: ShieldCheck },
         { id: "absensi", label: "Absensi Digital", icon: CheckSquare },
         { id: "penilaian", label: "Penilaian AI", icon: Cpu },
@@ -3101,7 +3101,7 @@ export default function App() {
             )}
             <div>
               <h1 className="text-sm font-black tracking-tight font-display text-white">
-                {isStudent ? "RUANG BELAJAR SISWA" : "JANG GURU APP HUB"}
+                {isStudent ? "RUANG BELAJAR SISWA" : "SUPER APP GURU HUB"}
               </h1>
               <span className="text-[10px] text-indigo-200 font-bold uppercase tracking-wider">
                 {isStudent ? "Portal Siswa Digital" : "Layanan Administrasi"}
@@ -3624,7 +3624,7 @@ export default function App() {
                   />
                 )}
 
-                {activeTab === "eduasisten" && (
+                {(activeTab === "jangguru" || activeTab === "eduasisten") && (
                   <EduAsisten />
                 )}
 

@@ -2654,7 +2654,7 @@ export default function EduAsisten() {
   const defaultMessage = {
     id: "welcome-msg",
     role: "assistant" as const,
-    content: "Halo! Saya **EduAsisten**, sistem AI ahli dalam Pedagogi dan Administrasi Pendidikan Kurikulum Merdeka.\n\nSaya siap membantu Bapak/Ibu Guru menyusun Modul Ajar (Pendekatan 8-3-3-4), menganalisis CP/TP/ATP, membuat soal (Taksonomi Bloom C1-C6), dan menyusun rubrik penilaian. Silakan pilih menu aplikasi di bawah ini atau ketikkan kebutuhan Anda."
+    content: "Halo! Saya **EduAsisten AI**, Asisten AI profesional & ahli pedagogi yang dirancang spesifik untuk mendampingi Bapak/Ibu Guru dalam merancang administrasi pembelajaran Kurikulum Merdeka (SD, SMP, SMA, SMK).\n\nSaya menguasai regulasi pendidikan terbaru (**Keputusan BSKAP No. 046/H/KR/2025** & **BKPDM No. 020 Tahun 2026**), Pembelajaran Mendalam (Deep Learning 8-3-3-4), **8 Dimensi Profil Lulusan**, kearifan lokal, Problem-Based Learning (PBL), serta asesmen HOTS & KKTP.\n\nAda yang dapat saya bantu dalam menyusun perangkat ajar atau membedah CP/TP/ATP hari ini?"
   };
 
   const [sessions, setSessions] = useState<ChatSession[]>(() => {
@@ -2663,38 +2663,20 @@ export default function EduAsisten() {
   const [savedModules, setSavedModules] = useState<any[]>(() => {
     return safeStorage.getJSON<any[]>("eduasisten_saved_modules", []);
   });
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(() => {
-    return safeStorage.getItem("eduasisten_current_session_id") || null;
-  });
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const currentSessionIdRef = useRef<string | null>(currentSessionId);
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSavedModulesModalOpen, setIsSavedModulesModalOpen] = useState(false);
   const [editingModule, setEditingModule] = useState<any | null>(null);
 
-  const [messages, setMessages] = useState<Message[]>(() => {
-    const savedSessions = safeStorage.getJSON<ChatSession[]>("eduasisten_sessions", []);
-    const activeId = safeStorage.getItem("eduasisten_current_session_id");
-    if (activeId) {
-      const found = savedSessions.find(s => s.id === activeId);
-      if (found && found.messages && found.messages.length > 0) {
-        return found.messages;
-      }
-    }
-    const lastActive = safeStorage.getJSON<Message[]>("eduasisten_active_messages", []);
-    if (lastActive && lastActive.length > 0) {
-      return lastActive;
-    }
-    return [defaultMessage];
-  });
+  const [messages, setMessages] = useState<Message[]>([]);
 
   const [editingAssistantMsgId, setEditingAssistantMsgId] = useState<string | null>(null);
   const [editingAssistantContent, setEditingAssistantContent] = useState("");
-
-  const hasModulAjarInSession = useMemo(() => {
-    return messages.some(msg => 
-      msg.role === "assistant" && 
-      (msg.content.toLowerCase().includes("modul ajar") || msg.content.toLowerCase().includes("identitas modul") || msg.content.toLowerCase().includes("desain pembelajaran") || msg.content.toLowerCase().includes("capaian pembelajaran"))
-    );
-  }, [messages]);
 
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -2731,6 +2713,8 @@ export default function EduAsisten() {
   useEffect(() => {
     if (messages && messages.length > 0) {
       safeStorage.setItem("eduasisten_active_messages", messages);
+    } else {
+      safeStorage.removeItem("eduasisten_active_messages");
     }
   }, [messages]);
 
@@ -2756,28 +2740,93 @@ export default function EduAsisten() {
   useEffect(() => {
     if (currentSessionId) {
       const session = sessions.find(s => s.id === currentSessionId);
-      if (session) setMessages(session.messages);
+      if (session) {
+        setMessages(session.messages);
+      }
+    } else {
+      setMessages([]);
     }
     setReplyingTo(null);
   }, [currentSessionId]);
 
   const saveCurrentSession = (newMessages: Message[]) => {
-    if (currentSessionId) {
+    const activeId = currentSessionIdRef.current;
+    if (activeId) {
       setSessions(prev => prev.map(s => 
-        s.id === currentSessionId ? { ...s, messages: newMessages, updatedAt: Date.now() } : s
+        s.id === activeId ? { ...s, messages: newMessages, updatedAt: Date.now() } : s
       ));
     } else {
       const newId = Date.now().toString();
-      const title = newMessages.find(m => m.role === "user")?.content.substring(0, 30) + "..." || "Percakapan Baru";
+      const firstUserMsg = newMessages.find(m => m.role === "user")?.content || "Percakapan Baru";
+      const title = firstUserMsg.length > 35 ? firstUserMsg.substring(0, 35) + "..." : firstUserMsg;
+      currentSessionIdRef.current = newId;
       setCurrentSessionId(newId);
       setSessions(prev => [{ id: newId, title, messages: newMessages, updatedAt: Date.now() }, ...prev]);
     }
   };
 
   const handleNewChat = () => {
+    currentSessionIdRef.current = null;
     setCurrentSessionId(null);
+    setMessages([]);
     setReplyingTo(null);
+    setIsLoading(false);
     setIsSidebarOpen(false);
+    safeStorage.removeItem("eduasisten_active_messages");
+    safeStorage.removeItem("eduasisten_current_session_id");
+  };
+
+  const handleResetEduAsistenAI = () => {
+    currentSessionIdRef.current = null;
+    setCurrentSessionId(null);
+    setMessages([]);
+    setReplyingTo(null);
+    setIsLoading(false);
+    setIsSidebarOpen(false);
+    
+    // Clear stored active message caches
+    safeStorage.removeItem("eduasisten_active_messages");
+    safeStorage.removeItem("eduasisten_current_session_id");
+    setReplyingTo(null);
+    setIsLoading(false);
+    setIsSidebarOpen(false);
+    
+    // Clear stored active message caches
+    safeStorage.removeItem("eduasisten_active_messages");
+    safeStorage.removeItem("eduasisten_current_session_id");
+
+    // Reset forms to clean state
+    setPerangkatForm(prev => ({
+      ...prev,
+      materi: "",
+      fokusMateri: "",
+      subMateri: [],
+      instruksiTambahan: ""
+    }));
+    setLkpdForm(prev => ({
+      ...prev,
+      materi: "",
+      fokusAktivitas: "",
+      subMateri: [],
+      instruksiTambahan: ""
+    }));
+    setSoalForm(prev => ({
+      ...prev,
+      materi: "",
+      fokusMateri: "",
+      subMateri: [],
+      instruksiTambahan: ""
+    }));
+
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("guru_data_updated"));
+    }
+  };
+
+  const handleClearCurrentChat = () => {
+    if (window.confirm("Apakah Anda yakin ingin mereset riwayat percakapan EduAsisten AI dan memulai sesi baru?")) {
+      handleResetEduAsistenAI();
+    }
   };
 
   const handleDeleteSession = (e: React.MouseEvent, sessionId: string) => {
@@ -2786,7 +2835,7 @@ export default function EduAsisten() {
     setSessions(updatedSessions);
     if (currentSessionId === sessionId) {
       setCurrentSessionId(null);
-      setMessages([defaultMessage]);
+      setMessages([]);
     }
   };
 
@@ -3260,24 +3309,6 @@ export default function EduAsisten() {
     const promptText = customInput || input;
     if (!promptText.trim() || isLoading) return;
 
-    // Check if the user is requesting LKPD, Materi or PPT
-    const promptLower = promptText.trim().toLowerCase();
-    const isRequestingLKPDOrMateriOrPPT = 
-      promptLower.includes("lkpd") || 
-      promptLower.includes("lembar kerja peserta didik") || 
-      promptLower.includes("materi pokok") || 
-      promptLower.includes("materi ajar") || 
-      promptLower.includes("tayangan ppt") || 
-      promptLower.includes("slide ppt") || 
-      promptLower.includes("presentasi ppt") ||
-      (promptLower.includes("ppt") && (promptLower.includes("buat") || promptLower.includes("susun") || promptLower.includes("bikin")));
-
-    if (isRequestingLKPDOrMateriOrPPT && !hasModulAjarInSession) {
-      alert("⚠️ Maaf Bapak/Ibu Guru, sesuai dengan alur kerja penyusunan perangkat Kurikulum Merdeka yang sistematis, pembuatan LKPD, Materi Pokok, atau Tayangan PPT memerlukan dokumen Modul Ajar / RPP yang selesai terlebih dahulu.\n\nSilakan gunakan menu 'Modul Ajar Deep Learning' di Menu Deck untuk menyusun Modul Ajar terlebih dahulu agar tujuan pembelajaran dan isi materi selaras.");
-      setInput(promptText); // Preserve the input text
-      return;
-    }
-
     let finalPrompt = promptText.trim();
     let replyToData = undefined;
 
@@ -3315,9 +3346,12 @@ export default function EduAsisten() {
       const responseText = await res.text();
       let data: any = {};
       try {
+        if (responseText.trim().startsWith("<")) {
+          throw new Error("Proses generasi AI membutuhkan waktu lebih lama atau koneksi server mengalami kelebihan beban sementara. Silakan coba klik tombol kirim lagi.");
+        }
         data = JSON.parse(responseText);
-      } catch {
-        throw new Error(`Server error (${res.status}): ${responseText.slice(0, 150)}`);
+      } catch (parseErr: any) {
+        throw new Error(parseErr.message || `Kendala respons server (${res.status}). Silakan coba beberapa saat lagi.`);
       }
 
       if (!res.ok) throw new Error(data.error || data.details || "Gagal mendapatkan respons dari EduAsisten");
@@ -3325,19 +3359,22 @@ export default function EduAsisten() {
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: data.result
+        content: data.result || "Tidak ada hasil yang diterima dari AI."
       };
 
       const finalMessages = [...newMessages, assistantMessage];
       setMessages(finalMessages);
       saveCurrentSession(finalMessages);
     } catch (err: any) {
-      console.error(err);
-      setMessages(prev => [...prev, {
+      console.error("EduAsisten submit error:", err);
+      const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: "Maaf, terjadi kesalahan saat menghubungi server. Mohon coba lagi nanti."
-      }]);
+        content: `⚠️ **Gagal memproses permintaan EduAsisten**: ${err.message || "Mohon coba beberapa saat lagi."}`
+      };
+      const errorMessages = [...newMessages, errorMsg];
+      setMessages(errorMessages);
+      saveCurrentSession(errorMessages);
     } finally {
       setIsLoading(false);
     }
@@ -3388,10 +3425,6 @@ export default function EduAsisten() {
     } else if (actionId === "soal") {
       setIsSoalModalOpen(true);
     } else if (actionId === "lkpd") {
-      if (!hasModulAjarInSession) {
-        alert("⚠️ Maaf Bapak/Ibu Guru, sesuai dengan alur kerja penyusunan perangkat Kurikulum Merdeka yang sistematis, pembuatan LKPD memerlukan penyusunan Modul Ajar / RPP yang selesai terlebih dahulu.\n\nSilakan gunakan menu 'Modul Ajar Deep Learning' di Menu Deck untuk menyusun Modul Ajar terlebih dahulu agar tujuan pembelajaran dan isi materi selaras.");
-        return;
-      }
       setIsLKPDModalOpen(true);
     } else if (actionId === "pembahasan") {
       setIsPembahasanModalOpen(true);
@@ -4869,6 +4902,16 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
             <Lightbulb size={14} className="text-amber-300" />
             <span className="hidden md:inline">Pembahasan Soal</span>
           </button>
+          {/* Tombol Sesi Baru / Bersihkan Layar */}
+          <button
+            onClick={handleClearCurrentChat}
+            className="px-2.5 sm:px-3 py-1.5 bg-white/15 hover:bg-white/25 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs border border-white/20"
+            title="Mulai Sesi Percakapan Baru / Bersihkan Tampilan Layar"
+          >
+            <Plus size={14} className="text-amber-300" />
+            <span className="hidden sm:inline">Sesi Baru</span>
+          </button>
+
           {sessions.length > 0 && (
             <button
               onClick={() => setIsSidebarOpen(!isSidebarOpen)}
@@ -5000,7 +5043,40 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
 
         {/* Main Chat Area */}
         <div className="flex-1 flex flex-col min-w-0 bg-slate-50/50">
-          <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 relative">
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 relative flex flex-col">
+            {messages.length === 0 && (
+              <div className="my-auto py-12 flex flex-col items-center justify-center text-center p-6">
+                <div className="w-16 h-16 rounded-3xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-4 border border-indigo-100 shadow-sm">
+                  <Bot size={32} />
+                </div>
+                <h3 className="text-base font-extrabold text-slate-800 mb-1">
+                  Kolom Chat EduAsisten AI Kosong
+                </h3>
+                <p className="text-xs text-slate-500 max-w-md leading-relaxed mb-6">
+                  Silakan ketik pertanyaan, perintah penyusunan administrasi guru, atau klik tombol <b>Menu Deck</b> di atas untuk menggunakan fitur cepat.
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-2 max-w-lg">
+                  <button
+                    onClick={() => handleQuickAction("modul", "")}
+                    className="px-3 py-2 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200/80 rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5"
+                  >
+                    <BookOpen size={14} /> Buat Modul Ajar
+                  </button>
+                  <button
+                    onClick={() => handleQuickAction("lkpd", "")}
+                    className="px-3 py-2 bg-white hover:bg-violet-50 text-violet-700 border border-violet-200/80 rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5"
+                  >
+                    <FileText size={14} /> Generator LKPD
+                  </button>
+                  <button
+                    onClick={() => handleQuickAction("soal", "")}
+                    className="px-3 py-2 bg-white hover:bg-amber-50 text-amber-700 border border-amber-200/80 rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5"
+                  >
+                    <FileQuestion size={14} /> Generator Soal
+                  </button>
+                </div>
+              </div>
+            )}
         <AnimatePresence initial={false}>
           {messages.map((msg) => (
             <motion.div
@@ -5267,6 +5343,12 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
                               <div className="absolute left-0 bottom-full mb-1 w-56 bg-white rounded-xl shadow-lg border border-slate-200 p-1 z-30 space-y-0.5 text-xs">
                                 <p className="px-2 py-1 font-bold text-[10px] text-slate-400 uppercase tracking-wider">Minta Perbaikan Jawaban</p>
                                 <button
+                                  onClick={() => handleQuickRevision(msg, "Tolong lanjutkan penulisan dokumen dari bagian terakhir (Bukti Transaksi / Tabel) yang terpotong secara utuh dan lengkap hingga bagian penutup.")}
+                                  className="w-full text-left px-2.5 py-1.5 hover:bg-emerald-50 text-emerald-800 font-bold rounded-lg text-xs flex items-center gap-1.5"
+                                >
+                                  <Sparkles size={12} className="text-emerald-600" /> ⏩ Lanjutkan Penulisan Dokumen Terpotong
+                                </button>
+                                <button
                                   onClick={() => handleQuickRevision(msg, "Sederhanakan penjelasan agar lebih ringkas dan mudah dipahami")}
                                   className="w-full text-left px-2.5 py-1.5 hover:bg-indigo-50 text-slate-700 rounded-lg text-xs"
                                 >
@@ -5373,6 +5455,18 @@ Bedah CP tersebut (merujuk kepada Keputusan Kepala BSKAP Nomor 046/H/KR/2025) me
         {/* Quick Toolbar Pill Buttons removed to keep chat area unobstructed */}
         
         <form onSubmit={handleSubmit} className="relative flex items-end gap-2">
+          {messages.length > 1 && (
+            <button
+              type="button"
+              onClick={handleClearCurrentChat}
+              className="h-[50px] w-[50px] shrink-0 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 text-slate-500 border border-slate-200 rounded-2xl flex flex-col items-center justify-center transition-colors shadow-2xs"
+              title="Bersihkan Layar & Mulai Sesi Baru"
+            >
+              <Trash2 size={16} />
+              <span className="text-[9px] font-bold mt-0.5">Sesi Baru</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => setIsPembahasanModalOpen(true)}

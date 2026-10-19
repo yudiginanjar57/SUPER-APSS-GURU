@@ -49,24 +49,28 @@ async function generateContentWithRetry(
   maybeParams?: { contents: any; config?: any }
 ) {
   const params = maybeParams || aiOrParams;
-  // Active non-lite Gemini models supported by @google/genai SDK v1beta
+  // Prioritize official optimal production models according to Gemini API guidelines
   const candidateModels = [
     "gemini-3.8-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
     "gemini-flash-latest",
     "gemini-3.1-pro-preview"
-  ].filter(model => !model.toLowerCase().includes("lite"));
+  ];
 
   const config = {
+    temperature: 0.7,
+    maxOutputTokens: 24576,
     ...(params.config || {})
   };
 
   let lastError: any = null;
+  let isQuotaExceeded = false;
 
   for (const model of candidateModels) {
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        // Use custom headers on attempt 1 & 2; fallback to standard headers without httpOptions on attempt 3 if fetch failed
-        const useCustomHeaders = attempt < 3;
+        const useCustomHeaders = attempt === 1;
         const client = getGeminiClient(useCustomHeaders);
 
         const response = await client.models.generateContent({
@@ -87,6 +91,7 @@ async function generateContentWithRetry(
 
         // If quota exceeded or RESOURCE_EXHAUSTED (429), immediately skip to next candidate model
         if (errStr.includes("RESOURCE_EXHAUSTED") || errStr.includes("Quota exceeded") || errStr.includes("quota") || err?.status === 429) {
+          isQuotaExceeded = true;
           console.warn(`[Gemini AI] Model ${model} quota exceeded (429/Resource Exhausted). Skipping to next model.`);
           break;
         }
@@ -106,16 +111,36 @@ async function generateContentWithRetry(
           errStr.includes("ETIMEDOUT") ||
           errStr.includes("TypeError");
 
-        console.warn(`[Gemini AI] Model ${model} (attempt ${attempt}/3) failed: ${errStr}`);
+        console.warn(`[Gemini AI] Model ${model} (attempt ${attempt}/2) failed: ${errStr}`);
 
-        if (isTransient && attempt < 3) {
-          const delayMs = Math.min(3000, 1000 * Math.pow(1.5, attempt));
-          await new Promise((res) => setTimeout(res, delayMs));
+        if (isTransient && attempt < 2) {
+          await new Promise((res) => setTimeout(res, 500));
         } else {
           break;
         }
       }
     }
+  }
+
+  // Emergency Fail-Safe: Try lighter models without custom headers
+  const fallbackModels = ["gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-flash-latest"];
+  for (const fallbackModel of fallbackModels) {
+    try {
+      console.info(`[Gemini AI] Attempting emergency fail-safe request with ${fallbackModel}...`);
+      const client = getGeminiClient(false);
+      const fallbackResponse = await client.models.generateContent({
+        model: fallbackModel,
+        contents: params.contents,
+        config
+      });
+      return fallbackResponse;
+    } catch (fallbackErr: any) {
+      console.warn(`[Gemini AI] Fail-safe with ${fallbackModel} failed:`, fallbackErr?.message || fallbackErr);
+    }
+  }
+
+  if (isQuotaExceeded) {
+    throw new Error("QUOTA_EXHAUSTED: Kuota harian layanan AI Cloud Gemini telah terlampaui (429 Rate Limit). Gunakan Mode AI Perangkat Lokal (Offline) untuk memproses dokumen secara instan.");
   }
 
   const finalErrMsg = lastError?.message || String(lastError?.cause || lastError);
@@ -928,7 +953,7 @@ TUGAS UTAMA & ATURAN MUTLAK PEMBEDAHAN BUNDEL (PDF / GAMBAR FOTO) MULTI-SISWA:
       config: {
         systemInstruction,
         responseMimeType: "application/json",
-        maxOutputTokens: 8192,
+        maxOutputTokens: 65536,
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -1250,30 +1275,46 @@ app.post("/api/eduasisten", async (req, res) => {
 
     const ai = getGeminiClient();
 
-    const systemInstruction = `Anda adalah "EduAsisten", sebuah sistem AI ahli dalam bidang Pedagogi dan Administrasi Pendidikan di Indonesia, khususnya untuk Kurikulum Merdeka. Selalu gunakan dua rujukan resmi utama Kemendikdasmen:
-1. **Sistem Informasi Perbukuan & Buku Teks Digital Kemendikdasmen** (https://buku.kemendikdasmen.go.id/): Rujukan struktur bab, sub-bab, serta materi Buku Teks Utama Siswa dan Buku Panduan Guru Kurikulum Merdeka.
-2. **Panduan Mata Pelajaran Kurikulum Merdeka Kemendikdasmen** (https://kurikulum.kemendikdasmen.go.id/panduan-mapel): Rujukan Capaian Pembelajaran (CP) berdasarkan Keputusan Kepala BSKAP Nomor 046/H/KR/2025, elemen, karakteristik, serta alur tujuan pembelajaran (ATP) seluruh jenjang (PAUD, SD, SMP, SMA, dan SMK).
+    const systemInstruction = `Anda adalah "EduAsisten", sebuah sistem AI ahli dalam bidang Pedagogi dan Administrasi Pendidikan di Indonesia, khususnya untuk Kurikulum Merdeka. Tugas utama Anda adalah membantu guru menyusun administrasi pembelajaran dengan efisien, akurat, dan terstruktur.
 
-Tugas utama Anda adalah membantu guru menyusun administrasi pembelajaran dengan efisien, akurat, kontekstual, mendalam, dan terstruktur.
+KAPABILITAS & TUGAS UTAMA:
+1. **Bedah CP, TP, dan ATP Terbaru**:
+   Menurunkan Capaian Pembelajaran (CP) sesuai dengan standar terbaru Keputusan Kepala BSKAP No. 046/H/KR/2025 yang diperbarui dengan Keputusan Kepala BKPDM No. 020 Tahun 2026, menjadi Tujuan Pembelajaran (TP) yang spesifik, terukur, menggunakan KKO Taksonomi Bloom, serta menyusun Alur Tujuan Pembelajaran (ATP) yang logis untuk Fase E dan F (serta Fase Fondasi hingga F).
+2. **Perancangan Modul Ajar & LKPD**:
+   Menyusun Modul Ajar Deep Learning (Pendekatan 8-3-3-4) dan Lembar Kerja Peserta Didik (LKPD) berbasis Problem-Based Learning (PBL) / Project-Based Learning (PjBL) yang kontekstual dan relevan dengan fakta dunia nyata (seperti regulasi pajak PBB, PPh 21 TER, kebijakan moneter, inflasi, perdagangan internasional, pasar modal, literasi keuangan OJK, dll).
+3. **Integrasi 8 Dimensi Profil Lulusan**:
+   Secara proaktif mengintegrasikan 8 Dimensi Profil Lulusan ke dalam kegiatan intrakurikuler dan kokurikuler. Kedelapan dimensi tersebut adalah:
+   - Keimanan dan Ketakwaan terhadap Tuhan YME
+   - Kewargaan
+   - Penalaran Kritis
+   - Kreativitas
+   - Kolaborasi
+   - Kemandirian
+   - Kesehatan
+   - Komunikasi
+4. **Penguatan Karakter & Kearifan Lokal**:
+   Menyelaraskan dimensi profil lulusan dengan nilai-nilai kearifan lokal Jawa Barat, khususnya filosofi karakter **Pancawaluya** (*cageur, bageur, bener, pinter, jeung singer*) dalam aktivitas siswa atau pembiasaan di lingkungan sekolah, seperti yang diterapkan di SMA Negeri 2 Tasikmalaya.
+5. **Asesmen Formatif, Sumatif & Rubrik KKTP**:
+   Merancang instrumen evaluasi (pilihan ganda A-E, esai, studi kasus) berorientasi HOTS (Higher Order Thinking Skills), lengkap dengan rubrik Kriteria Ketercapaian Tujuan Pembelajaran (KKTP) dan pedoman penskoran terperinci.
 
-⚠️ ATURAN MUTLAK KEDALAMAN & KELENGKAPAN DOKUMEN (DILARANG RINGKAS / MANDAT UTUH & KOMPREHENSIF):
-1. DILARANG KERAS menyajikan dokumen yang terlalu ringkas, dangkal, terpotong-potong, atau hanya berupa rangkuman/bullet point singkat.
-2. Seluruh dokumen yang Anda hasilkan (Modul Ajar Deep Learning, Generator Materi Ajar, LKPD, maupun Paket Soal) WAJIB disusun secara SANGAT LENGKAP, EKSPANSIF, DETAIL, DAN KOMPREHENSIF (setara naskah cetak buku teks/modul panduan guru resmi berhalaman-halaman) tanpa pemotongan isi.
-3. MODUL AJAR:
-   - Wajib menyajikan skenario pembelajaran yang lengkap untuk SELURUH alokasi pertemuan (Pertemuan 1, 2, 3, dst.) dengan narasi aktivitas guru dan peserta didik yang sangat terperinci (mindful, meaningful, joyful).
-   - Wajib melengkapi Asesmen Diagnostik (5 soal lengkap), Asesmen Formatif (5 soal lengkap), dan Asesmen Sumatif (5 soal lengkap) beserta kunci jawaban.
-   - Wajib membuat Rubrik Penilaian Sikap dan Proyek/Kinerja yang sangat detail dengan indikator diobservasi pada setiap level (Skala 1 - 4).
-   - Wajib menyajikan Lembar Pengesahan Tanda Tangan Kepala Sekolah dan Guru Pengampu.
-4. MATERI AJAR / HANDOUT SISWA:
-   - Wajib diuraikan Sub-Bab demi Sub-Bab secara tuntas, multi-paragraf, kaya konsep, teori, contoh kasus riil, analogi, rumus LaTeX, tabel komparasi, catatan miskonsepsi, hingga uji pemahaman formatif dengan pembahasan.
-5. LKPD (LEMBAR KERJA PESERTA DIDIK):
-   - Wajib memuat multi-stimulus yang kaya (studi kasus mendalam, tabel data riil, dialog polemik), 3 tantangan berjenjang (C3-C6) dengan ruang kerja siswa yang siap diisi, lembar refleksi metakognitif, rubrik penilaian, serta PANDUAN FASILITASI GURU & KUNCI JAWABAN ACUAN LENGKAP di bagian paling akhir.
-6. PAKET SOAL HOTS & PEMBAHASAN:
-   - Wajib menyajikan naskah soal lengkap dengan stimulus (grafik SVG inline, tabel markdown, atau callout kasus), opsi pilihan jawaban A-E yang terstruktur, serta Kunci Jawaban & Pembahasan Detail Step-by-Step per nomor beserta analisis pengecoh.
+Rujukan Resmi Kemendikdasmen:
+1. **Sistem Informasi Perbukuan & Buku Teks Digital Kemendikdasmen** (https://buku.kemendikdasmen.go.id/): Buku Teks Utama Siswa & Panduan Guru.
+2. **Panduan Mata Pelajaran Kurikulum Merdeka Kemendikdasmen** (https://kurikulum.kemendikdasmen.go.id/panduan-mapel): CP BSKAP 046/H/KR/2025 & BKPDM 020/2026.
 
-Anda memiliki 4 kemampuan utama. Anda harus merespons permintaan pengguna berdasarkan fitur yang mereka minta:
+ATURAN INTERAKSI & SIKAP:
+- Jika instruksi pengguna kurang spesifik atau butuh penajaman fokus, bertanyalah terlebih dahulu secara santun dan profesional (contoh: "Untuk materi Ekonomi Fase F kelas XII ini, apakah Bapak/Ibu ingin memfokuskan pada dimensi Penalaran Kritis atau Kewargaan?").
+- Gunakan bahasa Indonesia baku, akademis, profesional, dan suportif khas pendidik.
 
-1. PEMBUATAN RPPM / MODUL AJAR (Pendekatan 8-3-3-4 / Deep Learning)
+FORMAT OUTPUT STANDAR:
+- Gunakan Heading (##, ###) untuk memisahkan struktur dokumen.
+- Gunakan Tabel Markdown untuk menyajikan matriks ATP, rubrik KKTP, atau pemetaan kisi-kisi soal agar mudah disalin.
+- Untuk setiap soal atau studi kasus yang diberikan, SELALU sediakan pedoman penskoran dan kunci jawaban di bagian paling bawah pada akhir dokumen.
+
+⚠️ ATURAN MUTLAK KEDALAMAN & KELENGKAPAN DOKUMEN:
+1. DILARANG KERAS menyajikan dokumen yang terlalu ringkas atau terpotong-potong.
+2. Seluruh dokumen (Modul Ajar, LKPD, Materi Ajar, Paket Soal) WAJIB disusun secara SANGAT LENGKAP, DETAIL, DAN KOMPREHENSIF.
+3. LKPD (LEMBAR KERJA PESERTA DIDIK): Kolom analisis siswa WAJIB dikosongkan/diberi titik-titik (...................) untuk dikerjakan siswa, dan sediakan "PANDUAN FASILITASI GURU: KUNCI JAWABAN ACUAN & PEDOMAN PENSKORAN" di bagian paling akhir.
+
 Mendukung seluruh mata pelajaran untuk jenjang PAUD (Fase Fondasi), SD (Fase A-C), SMP (Fase D), SMA (Fase E-F atau Kelas X-XII), dan SMK (Fase E-F, mencakup Projek IPAS SMK, Dasar-Dasar Keahlian Vokasi Fase E, serta seluruh Konsentrasi Keahlian Kejuruan Fase F seperti RPL, TKJ, TKR, TSM, AKL, MPLB, Bisnis Digital/Pemasaran, Kuliner, DKV, Perhotelan, Keperawatan, Agribisnis, Teknik Listrik & Mesin, PKK SMK, dan PKL).
 Jika pengguna meminta pembuatan RPPM atau Modul Ajar, Anda WAJIB menyusun output dokumen secara LENGKAP, TERSTRUKTUR, SANGAT DETAIL, dan RAPI mengikut urutan 6 bagian utama berikut:
 
@@ -1662,7 +1703,7 @@ ATURAN FORMATTING DAN NADA BAHASA:
       contents,
       config: {
         systemInstruction,
-        maxOutputTokens: 8192,
+        maxOutputTokens: 65536,
       }
     });
 
@@ -1815,10 +1856,9 @@ KETENTUAN KODE SVG WAJIB:
   }
 });
 
-// API 404 handler
-
+// API 404 handler - catch any unhandled /api/* requests
 app.all("/api/*", (req, res) => {
-  res.status(404).json({ error: `API route ${req.method} ${req.url} tidak ditemukan.` });
+  res.status(404).json({ error: `API route ${req.method} ${req.originalUrl || req.url} tidak ditemukan.` });
 });
 
 // Express Global Error Handler for API / body-parsing errors
@@ -1842,18 +1882,32 @@ async function setupServer() {
       server: { middlewareMode: true },
       appType: "spa",
     });
-    app.use(vite.middlewares);
+    // Ensure vite middleware only handles non-API routes
+    app.use((req, res, next) => {
+      if (req.path.startsWith("/api/")) {
+        res.status(404).json({ error: `API route ${req.method} ${req.path} tidak ditemukan.` });
+        return;
+      }
+      vite.middlewares(req, res, next);
+    });
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
+      if (req.path.startsWith("/api/")) {
+        res.status(404).json({ error: `API route ${req.method} ${req.path} tidak ditemukan.` });
+        return;
+      }
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+  server.setTimeout(600000);
+  server.keepAliveTimeout = 600000;
+  server.headersTimeout = 600000;
 }
 
 setupServer();
